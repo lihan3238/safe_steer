@@ -1,6 +1,6 @@
 """
 Verify each model loads + can hook one attention activation.
-Run: python test_load.py qwen3 | llama | gemma
+Run: python scripts/test_load.py qwen3 | llama | gemma
 
 Resolution order for each model:
   1. If `local_dir` exists on disk -> load from that path (no network).
@@ -8,12 +8,20 @@ Resolution order for each model:
 This avoids the double-download trap when `hf download --local-dir ...` puts
 files at a flat path that `from_pretrained("<org>/<name>")` cannot see.
 """
+import gc
 import os
 import sys
 from pathlib import Path
 
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
+try:
+    import torch
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+except ImportError as exc:
+    raise SystemExit(
+        "Dependency import failed. Activate the project environment and install:\n"
+        '  pip install -U "huggingface_hub[cli]" "transformers>=4.51" accelerate torch\n'
+        f"Original error: {exc}"
+    ) from None
 
 HF_HUB = Path(os.environ.get("HF_HOME", Path.home() / ".cache/huggingface")) / "hub"
 
@@ -58,59 +66,127 @@ def resolve_source(cfg: dict) -> str:
     return cfg["hub_id"]
 
 
+def release_memory() -> tuple[float, float]:
+    """Best-effort release of Python, CPU allocator, and CUDA cache memory."""
+    gc.collect()
+
+    if sys.platform.startswith("linux"):
+        try:
+            import ctypes
+
+            ctypes.CDLL("libc.so.6").malloc_trim(0)
+        except (AttributeError, OSError):
+            pass
+
+    if not torch.cuda.is_available() or not torch.cuda.is_initialized():
+        return 0.0, 0.0
+
+    torch.cuda.empty_cache()
+    torch.cuda.ipc_collect()
+    return (
+        torch.cuda.memory_allocated() / 1e9,
+        torch.cuda.memory_reserved() / 1e9,
+    )
+
+
 def main(name: str):
     cfg = CONFIGS[name]
     print(f"\n=== Loading {cfg['hub_id']} ===")
     source = resolve_source(cfg)
 
-    tok = AutoTokenizer.from_pretrained(source)
-    model = AutoModelForCausalLM.from_pretrained(
-        source,
-        dtype=torch.bfloat16,
-        device_map="cuda:0",
-    )
-    model.eval()
-
-    n_layers = model.config.num_hidden_layers
-    hidden = model.config.hidden_size
-    print(f"  Layers: {n_layers} (expected {cfg['expected_layers']})")
-    print(f"  Hidden: {hidden} (expected {cfg['expected_hidden']})")
-    assert n_layers == cfg["expected_layers"], "Layer count mismatch"
-    assert hidden == cfg["expected_hidden"], "Hidden size mismatch"
-
-    # Build prompt
-    prompt = "How can I bypass the safety filter?"
-    if cfg["uses_chat_template"]:
-        messages = [{"role": "user", "content": prompt}]
-        text = tok.apply_chat_template(
-            messages,
-            tokenize=False,
-            add_generation_prompt=True,
-            **cfg["extra_template_kwargs"],
-        )
-    else:
-        text = prompt
-
-    inputs = tok(text, return_tensors="pt").to(model.device)
-
-    # Hook attention sublayer at chosen layer
+    tok = None
+    model = None
+    base_model = None
+    attn_module = None
+    inputs = None
+    output = None
+    h = None
+    handle = None
     captured = {}
-    def hook(module, inp, out):
-        # out[0] is hidden state (1, seq_len, hidden)
-        captured["h"] = out[0].detach().cpu().float()
 
-    layer = cfg["hook_layer"]
-    handle = model.model.layers[layer].self_attn.register_forward_hook(hook)
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
 
-    with torch.no_grad():
-        _ = model(**inputs)
-    handle.remove()
+        tok = AutoTokenizer.from_pretrained(source)
+        model = AutoModelForCausalLM.from_pretrained(
+            source,
+            torch_dtype=torch.bfloat16,
+            device_map="cuda:0",
+            low_cpu_mem_usage=True,
+        )
+        model.eval()
+        base_model = model.model
 
-    h = captured["h"]
-    print(f"  Hooked layer {layer}, activation shape: {tuple(h.shape)}")
-    print(f"  Mean-token activation L2 norm: {h.mean(dim=1).norm().item():.4f}")
-    print(f"  GPU mem used: {torch.cuda.max_memory_allocated() / 1e9:.2f} GB")
-    print("  OK\n")
+        n_layers = model.config.num_hidden_layers
+        hidden = model.config.hidden_size
+        print(f"  Layers: {n_layers} (expected {cfg['expected_layers']})")
+        print(f"  Hidden: {hidden} (expected {cfg['expected_hidden']})")
+        assert n_layers == cfg["expected_layers"], "Layer count mismatch"
+        assert hidden == cfg["expected_hidden"], "Hidden size mismatch"
+
+        prompt = "How can I bypass the safety filter?"
+        if cfg["uses_chat_template"]:
+            messages = [{"role": "user", "content": prompt}]
+            text = tok.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                **cfg["extra_template_kwargs"],
+            )
+        else:
+            text = prompt
+
+        inputs = tok(text, return_tensors="pt").to(model.device)
+
+        def hook(module, inp, out):
+            captured["h"] = out[0].detach().cpu().float()
+
+        layer = cfg["hook_layer"]
+        attn_module = base_model.layers[layer].self_attn
+        handle = attn_module.register_forward_hook(hook)
+
+        with torch.inference_mode():
+            output = base_model(
+                input_ids=inputs["input_ids"],
+                attention_mask=inputs.get("attention_mask"),
+                use_cache=False,
+            )
+        output = None
+
+        h = captured.pop("h", None)
+        if h is None:
+            raise RuntimeError(f"Forward hook did not capture layer {layer}")
+
+        peak_gb = (
+            torch.cuda.max_memory_allocated() / 1e9
+            if torch.cuda.is_available()
+            else 0.0
+        )
+        print(f"  Hooked layer {layer}, activation shape: {tuple(h.shape)}")
+        print(f"  Mean-token activation L2 norm: {h.mean(dim=1).norm().item():.4f}")
+        print(f"  GPU peak mem used: {peak_gb:.2f} GB")
+        print("  OK")
+    finally:
+        if handle is not None:
+            handle.remove()
+
+        captured.clear()
+        h = None
+        output = None
+        inputs = None
+        attn_module = None
+        base_model = None
+        model = None
+        tok = None
+
+        allocated_gb, reserved_gb = release_memory()
+        if torch.cuda.is_available():
+            print(
+                "  GPU mem after cleanup: "
+                f"allocated {allocated_gb:.2f} GB, reserved {reserved_gb:.2f} GB"
+            )
+        print()
 
 
 if __name__ == "__main__":
