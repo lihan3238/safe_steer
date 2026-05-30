@@ -1,0 +1,17 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.ipynb_checkpoints/
+
+# Data & model artifacts (rebuild via scripts/prepare_data.py)
+data/*
+!data/manifest.json
+vectors/
+*.pt
+*.safetensors
+
+# OS / editor
+.DS_Store

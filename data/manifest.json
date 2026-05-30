@@ -1,0 +1,121 @@
+{
+  "generated_with": {
+    "script": "scripts/prepare_data.py",
+    "seed": 0,
+    "hf_datasets_root": "/home/lihan/.cache/huggingface/datasets"
+  },
+  "schema": {
+    "fields": [
+      "id",
+      "text",
+      "response",
+      "category",
+      "role",
+      "source"
+    ],
+    "roles": [
+      "harmful",
+      "generic_safe"
+    ],
+    "note": "text=prompt/question; response=answer or null (paper Sec. 3.1)."
+  },
+  "paper_note": "CatQA and BeaverTails each use their OWN 3 representative categories (Table 1/2); categories are NOT mapped across datasets. Only 'Hate' overlaps and may be compared across datasets.",
+  "artifacts": [
+    {
+      "path": "data/processed/catqa/adult_content.harmful.jsonl",
+      "dataset": "CatQA",
+      "source": "declare-lab/CategoricalHarmfulQA",
+      "source_file": "/home/lihan/.cache/huggingface/datasets/CategoricalHarmfulQA/data/catqa_english.json",
+      "category_slug": "adult_content",
+      "category_native": "Adult Content",
+      "role": "harmful",
+      "n_requested": 200,
+      "n_available": 50,
+      "n_actual": 50
+    },
+    {
+      "path": "data/processed/catqa/hate_harass_violence.harmful.jsonl",
+      "dataset": "CatQA",
+      "source": "declare-lab/CategoricalHarmfulQA",
+      "source_file": "/home/lihan/.cache/huggingface/datasets/CategoricalHarmfulQA/data/catqa_english.json",
+      "category_slug": "hate_harass_violence",
+      "category_native": "Hate/Harass/Violence",
+      "role": "harmful",
+      "n_requested": 200,
+      "n_available": 46,
+      "n_actual": 46
+    },
+    {
+      "path": "data/processed/catqa/physical_harm.harmful.jsonl",
+      "dataset": "CatQA",
+      "source": "declare-lab/CategoricalHarmfulQA",
+      "source_file": "/home/lihan/.cache/huggingface/datasets/CategoricalHarmfulQA/data/catqa_english.json",
+      "category_slug": "physical_harm",
+      "category_native": "Physical Harm",
+      "role": "harmful",
+      "n_requested": 200,
+      "n_available": 50,
+      "n_actual": 50
+    },
+    {
+      "path": "data/processed/beavertails/child_abuse.harmful.jsonl",
+      "dataset": "BeaverTails",
+      "source": "PKU-Alignment/BeaverTails",
+      "source_file": "/home/lihan/.cache/huggingface/datasets/BeaverTails/round0/30k/train.jsonl.gz",
+      "category_slug": "child_abuse",
+      "category_native": "child_abuse",
+      "role": "harmful",
+      "n_requested": 200,
+      "n_available": 81,
+      "n_actual": 81
+    },
+    {
+      "path": "data/processed/beavertails/terrorism_organized_crime.harmful.jsonl",
+      "dataset": "BeaverTails",
+      "source": "PKU-Alignment/BeaverTails",
+      "source_file": "/home/lihan/.cache/huggingface/datasets/BeaverTails/round0/30k/train.jsonl.gz",
+      "category_slug": "terrorism_organized_crime",
+      "category_native": "terrorism,organized_crime",
+      "role": "harmful",
+      "n_requested": 200,
+      "n_available": 188,
+      "n_actual": 188
+    },
+    {
+      "path": "data/processed/beavertails/hate_speech_offensive.harmful.jsonl",
+      "dataset": "BeaverTails",
+      "source": "PKU-Alignment/BeaverTails",
+      "source_file": "/home/lihan/.cache/huggingface/datasets/BeaverTails/round0/30k/train.jsonl.gz",
+      "category_slug": "hate_speech_offensive",
+      "category_native": "hate_speech,offensive_language",
+      "role": "harmful",
+      "n_requested": 200,
+      "n_available": 1226,
+      "n_actual": 200
+    },
+    {
+      "path": "data/processed/beavertails/generic_safe.jsonl",
+      "dataset": "BeaverTails",
+      "source": "PKU-Alignment/BeaverTails",
+      "source_file": "/home/lihan/.cache/huggingface/datasets/BeaverTails/round0/30k/train.jsonl.gz",
+      "category_slug": "generic",
+      "category_native": "safe",
+      "role": "generic_safe",
+      "n_requested": 200,
+      "n_available": 4555,
+      "n_actual": 200
+    },
+    {
+      "path": "data/processed/alpaca/generic_safe.jsonl",
+      "dataset": "Alpaca",
+      "source": "tatsu-lab/alpaca",
+      "source_file": "/home/lihan/.cache/huggingface/datasets/alpaca/data/train-00000-of-00001-a09b74b3ef9c3b56.parquet",
+      "category_slug": "generic",
+      "category_native": "n/a",
+      "role": "generic_safe",
+      "n_requested": 500,
+      "n_available": 52002,
+      "n_actual": 500
+    }
+  ]
+}
