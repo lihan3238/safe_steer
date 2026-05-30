@@ -336,6 +336,37 @@ Wrote manifest: data/manifest.json (8 artifacts)
 
 ---
 
+## 6.5 实验流程 ↔ 代码数据流(主笔记)
+
+> 这是本仓的"主笔记"板块:把**理论步骤 → 论文公式 → 代码位置 → 数据结构 in→out**钉在一起,每完成一个模块就增量补一行,让笔记和代码同步生长。✅=已实现,⬜=待实现。
+
+| # | 理论步骤 | 论文 | 代码 | 数据结构 in → out | 状态 |
+|---|---|---|---|---|---|
+| 1 | 取数据、按数据集×类别组装"有害侧 + 通用安全侧" | §4.1 | `src/data.py` | `data/processed/*.jsonl` → `CategorySplit{harmful, generic_safe}` | ✅ |
+| 2 | 抽 attention 子层 activation,跨 token 求均值,每输入每层一个向量 | Eq.1 的 `act(x)` | `src/hooks.py` | `texts:list[str]` → `{layer: (N, hidden)}` | ✅ |
+| 3 | 差分均值得转向向量 ω = mean(safe) − mean(unsafe);可选 L2 范数剪枝 | Eq.1 + §3.3 | `src/vectors.py` | `safe (N,h)`, `unsafe (N,h)` → `{layer: (hidden,)}` | ⬜ |
+| 4 | 推理时把 ω 按层注入 self-attention 输出:`h_l += m·ω_l` | Eq.2 | `src/steering.py` | `ω{layer:(hidden,)}` + `m` → 钩住前向、改写 `h_l` | ⬜ |
+| 5 | 评测:steered vs naive 的 %UR(unsafe rate)下降 + 文本质量 | §4.4 | `scripts/eval_steering.py` | 生成文本 → `%UR↓`, helpfulness/coherence | ⬜ |
+
+**端到端数据流管线**:
+
+```
+CategorySplit            {layer:(N,hidden)}        {layer:(hidden,)}      改写前向
+harmful / generic_safe ──► [hooks] mean-pool ──► [vectors] 差分+剪枝 ──► [steering] h+=m·ω ──► [eval] %UR↓
+   (src/data.py)            (src/hooks.py)         (src/vectors.py)        (src/steering.py)   (eval_steering.py)
+```
+
+**模块 2 关键点(`src/hooks.py`,对照 Eq.1)**:
+
+- `act(x)` 的实现 = 在 `model.model.layers[l].self_attn` 注册 forward hook,抓子层输出 `(B, seq, hidden)`,再 `mean_pool` **按 attention_mask 跨真实 token 求均值**(排除 padding)→ `(B, hidden)`。
+- **每样本保留一个向量**(`(N, hidden)`,不预先平均):§3.3 的 L2 剪枝和 t-SNE 解缠图都需要逐样本数据。
+- 输入格式开关 `use_response`:默认 **prompt-only**(CatQA 无 response,保证有害/安全侧格式统一);置 True 则把 `{prompt, response}` 拼进去(论文 §3.1 允许两种)。
+- transformers 5.x 健壮性:`self_attn` 输出可能是 tuple 或 tensor,统一取 hidden 并**断言最后一维 == hidden_size**,结构若变即刻报错而非污染向量。
+
+**自测(不需 GPU/大模型)**:`python src/hooks.py` 用一个微型随机权重 Llama 验证 ① 输出形状 `(N, hidden)`;② `mean_pool` 对 padding 不敏感(padded == unpadded);③ `use_response` 开关确实改变 activation。
+
+---
+
 ## 7. 向量提取 pipeline 计划
 
 > 论文实验我先读,这里先把代码骨架的目标定下来,跑通前再细化。代码放 `src/` + `scripts/`,所有产出物落 `vectors/<model>/<dataset>/<layer>.pt`。
