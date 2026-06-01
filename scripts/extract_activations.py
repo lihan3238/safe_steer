@@ -30,13 +30,14 @@ sys.path.insert(0, str(REPO_ROOT))
 import torch
 
 from src.data import load_category_split
-from src.models import CONFIGS
+from src.models import CONFIGS, get_config
 
 
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("--model", required=True, choices=list(CONFIGS))
+    p.add_argument("--model", required=True, metavar="NAME_OR_PATH",
+                   help="registered model (%s) or a local dir/path" % "|".join(CONFIGS))
     p.add_argument("--dataset", required=True, choices=["CatQA", "BeaverTails"])
     p.add_argument("--category", required=True, help="category slug (see manifest)")
     p.add_argument("--safe-source", default="alpaca", choices=["alpaca", "beavertails"])
@@ -55,7 +56,7 @@ def parse_args():
 
 def main():
     args = parse_args()
-    cfg = CONFIGS[args.model]
+    cfg = get_config(args.model)
     layers = args.layers if args.layers is not None else cfg["paper_layers"]
 
     # validate layers against the model's depth before doing anything expensive

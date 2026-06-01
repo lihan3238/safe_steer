@@ -6,6 +6,10 @@ __pycache__/
 venv/
 .ipynb_checkpoints/
 
+# Secrets — never commit (keep .env.example only)
+.env
+!.env.example
+
 # Data & model artifacts (rebuild via scripts/prepare_data.py)
 data/*
 !data/manifest.json
@@ -18,3 +22,6 @@ vectors/
 
 # extracted activations (rebuild via scripts/extract_activations.py)
 activations/
+
+# eval outputs (rebuild via scripts/eval_steering.py)
+eval/

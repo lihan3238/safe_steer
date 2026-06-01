@@ -40,7 +40,7 @@ $$\theta^{attn}_{\ell} \;\leftarrow\; \theta^{attn}_{\ell} + m\cdot\omega^{c}_{\
 | 2 | 抽 attention 激活,跨 token 求均值 | Eq.1 `act(x)` | `src/hooks.py` | `texts:list[str]` → `{layer:(N,hidden)}` | ✅ |
 | 3 | 差分得 ω(+L2 剪枝) | Eq.1 + §3.3 | `src/vectors.py` | `safe,(harmful) (N,h)` → `{layer:(hidden,)}` | ✅ |
 | 4 | 推理时按层注入 `h+=m·ω` | Eq.2 | `src/steering.py` | `ω{layer:(hidden,)}` + `m` → 改写前向 | ✅ |
-| 5 | 评测 %UR↓ + 文本质量 | §4.4 | `scripts/eval_steering.py` | 生成文本 → `%UR↓`, help/coherence | ⬜ |
+| 5 | 评测 %UR↓ + 文本质量 | §4.4 | `scripts/eval_steering.py` | 生成文本 → `%UR↓`(+质量轴待接) | ✅ |
 
 **端到端管线**:
 
@@ -86,6 +86,7 @@ harmful / generic_safe ─► [hooks] mean-pool ─► [vectors] 差分+剪枝 �
 **`scripts/test_load.py`** — 冒烟:`python scripts/test_load.py qwen3|llama|gemma`,验证模型加载 + 单层钩子结构。
 **`scripts/extract_activations.py`** — 编排 data→hooks,真实模型激活落盘(详见下)。
 **`scripts/extract_vectors.py`** — 编排 hooks→vectors:读 `{harmful,safe}.pt` → `compute_steering_vectors` → 存 ω 到 `vectors/<m>/<ds>/<cat>/{vanilla,pruned}.pt`。纯 CPU。`--prune --report` 打印每层 ‖ω‖ 及 vanilla↔pruned 余弦。
+**`scripts/eval_steering.py`** — 编排 vectors→steering→评测:naive vs steered 生成 → judge 判 unsafe → %UR 下降。`--multiplier 0.5 1 2` 扫强度(一次加载、naive 只算一次);判定器 `--classifier llm`(默认,Anthropic/OpenAI 双路,Claude/GPT judge,凭据走 `.env`)或 `keyword`(离线)。产物 `eval/<m>/<ds>/<cat>/<variant>_sweep_*.json`。
 
 ### `extract_activations.py` 与它的 `.pt` 产物
 
@@ -144,6 +145,19 @@ python scripts/extract_activations.py --model qwen3 --dataset CatQA --category a
 - **m 可正可负**:复现论文 multiplier 范围;负 m = 反向转向。
 - **self-test 要点**:`python src/steering.py` 验证 ① 注入改变输出;② 退出 `with` 后无残留(可拆);③ m=0 恒等;④ **线性性**——小 m 下 +m/−m 扰动余弦 = −1.0000、10× m → 10× 扰动幅度(直接证明 `h+=m·ω` 的线性结构);⑤ 多层注入。纯 CPU。
 
+**模块 5 `scripts/eval_steering.py`** — §4.4 评测,验证论文核心主张:
+- **只测安全轴 %UR**:naive(无 steering)vs steered(注入 m·ω)各生成,judge 判 unsafe,看 %UR 下降。质量轴(Nemotron 5 项)暂未接 —— 论文明确**不用通用 LLM 评质量**(judge 偏好"给方案"胜过"拒答",会低估安全回答),故留待接 reward 模型。
+- **judge = LLM 二分类**:论文用 GPT-4;我们用 Claude(被测是 Qwen,无自评偏差)。`--judge-protocol` 双路(anthropic/openai),凭据走 `.env`。这是与论文的 documented deviation(judge 模型不同,但方法论一致:LLM 仅做安全二分类)。
+- **multiplier 扫描**:`--multiplier 0.5 1 2 ...` 一次加载扫多值,naive 只算一次,自动报告最佳 m。
+
+**关键实证发现(样本量 → ω 尺度 → 有效 m)**:
+- 论文 Eq.2 **不归一化** ω(实测确认),且论文用 **1500 样本/类**、m≈0.5–1。
+- 我们先用 CatQA adult_content **仅 50 样本**算 ω → 范数失控(深层 ‖ω‖≈99 ≫ 激活尺度 ~13)→ 逼得 **m=4** 才见效、且文本崩坏(复读机乱码,judge 误判 safe)。
+- 改用 BeaverTails hate_speech **1226 样本** 重算 → ω 范数回落(深层 18、浅层 2.3,接近激活尺度)→ **m=1.0 即最佳**(%UR 40%→10%,真转向、文本连贯)、回到论文 multiplier 范围。
+- **结论**:mean-difference 的 ω 尺度对**样本量**敏感;样本太少 → ω 噪声大、范数虚高 → 需异常大的 m 补偿,反而破坏文本。**复现论文趋势必须用足够样本(贴近 1500/类)**,这也是 §3.3 剪枝去噪的同源动机。
+
+> 自测:`python scripts/eval_steering.py ... --classifier keyword` 可离线(无 API)粗跑;judge 连通性已用 Claude/Anthropic 验证。
+
 ---
 
 ## 5. 快速上手
@@ -157,7 +171,15 @@ python src/data.py                           # 各模块自测,纯 CPU
 python src/hooks.py
 python src/vectors.py
 python scripts/test_load.py qwen3            # 验证真实模型加载+钩子(需 GPU)
+
+# 端到端(论文趋势需足够样本,见 §4 实证发现):
+python scripts/prepare_data.py --only beavertails --only alpaca --n-harmful 1500 --n-safe 1500
+python scripts/extract_activations.py --model qwen3-1.7b-base --dataset BeaverTails --category hate_speech_offensive --safe-source beavertails
+python scripts/extract_vectors.py     --model qwen3-1.7b-base --dataset BeaverTails --category hate_speech_offensive --prune
+python scripts/eval_steering.py       --model qwen3-1.7b-base --dataset BeaverTails --category hate_speech_offensive --variant pruned --multiplier 0.5 1 2 --limit 10
 ```
+
+> 注册模型(`src/models.py`):`qwen3`/`qwen3-base`/`qwen3-1.7b`/`qwen3-1.7b-base`/`llama`/`llama-base`/`gemma`/`gemma-base`,也可直接传本地目录名/路径。8B 需 ≥24GB 显存;1.7B 在 16GB 上即可跑全链。judge 凭据放 `.env`(见 `.env.example`)。
 
 ---
 

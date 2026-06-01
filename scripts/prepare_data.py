@@ -247,17 +247,35 @@ def prepare_alpaca(rng: random.Random) -> list[dict]:
 
 
 def main() -> None:
+    global N_HARMFUL_PER_CAT, N_BEAVERTAILS_SAFE, N_ALPACA
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--only", choices=["catqa", "beavertails", "alpaca"], action="append",
         help="prepare only these datasets (default: all)",
     )
+    parser.add_argument("--n-harmful", type=int, default=None,
+                        help="override harmful samples per category (default %d)" % N_HARMFUL_PER_CAT)
+    parser.add_argument("--n-safe", type=int, default=None,
+                        help="override BeaverTails generic_safe size (default %d)" % N_BEAVERTAILS_SAFE)
+    parser.add_argument("--n-alpaca", type=int, default=None,
+                        help="override Alpaca generic_safe size (default %d)" % N_ALPACA)
     args = parser.parse_args()
     targets = args.only or ["catqa", "beavertails", "alpaca"]
 
+    # CLI overrides for sample sizes (defaults are the smoke config; bump these
+    # toward the paper's 1500/category for fuller runs where data allows).
+    if args.n_harmful is not None:
+        N_HARMFUL_PER_CAT = args.n_harmful
+    if args.n_safe is not None:
+        N_BEAVERTAILS_SAFE = args.n_safe
+    if args.n_alpaca is not None:
+        N_ALPACA = args.n_alpaca
+
     print(f"HF datasets root: {HF_DATASETS}")
     print(f"Output root:      {OUT_ROOT}")
-    print(f"Seed: {SEED}\n")
+    print(f"Seed: {SEED}  sizes: harmful/cat={N_HARMFUL_PER_CAT} "
+          f"bt_safe={N_BEAVERTAILS_SAFE} alpaca={N_ALPACA}\n")
 
     artifacts = []
     # one RNG per dataset so adding/removing a dataset doesn't shift the others
