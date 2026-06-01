@@ -39,7 +39,7 @@ $$\theta^{attn}_{\ell} \;\leftarrow\; \theta^{attn}_{\ell} + m\cdot\omega^{c}_{\
 | 1 | 按数据集×类别取"有害侧 + 安全侧" | §4.1 | `src/data.py` | `data/processed/*.jsonl` → `CategorySplit{harmful, generic_safe}` | ✅ |
 | 2 | 抽 attention 激活,跨 token 求均值 | Eq.1 `act(x)` | `src/hooks.py` | `texts:list[str]` → `{layer:(N,hidden)}` | ✅ |
 | 3 | 差分得 ω(+L2 剪枝) | Eq.1 + §3.3 | `src/vectors.py` | `safe,(harmful) (N,h)` → `{layer:(hidden,)}` | ✅ |
-| 4 | 推理时按层注入 `h+=m·ω` | Eq.2 | `src/steering.py` | `ω{layer:(hidden,)}` + `m` → 改写前向 | ⬜ |
+| 4 | 推理时按层注入 `h+=m·ω` | Eq.2 | `src/steering.py` | `ω{layer:(hidden,)}` + `m` → 改写前向 | ✅ |
 | 5 | 评测 %UR↓ + 文本质量 | §4.4 | `scripts/eval_steering.py` | 生成文本 → `%UR↓`, help/coherence | ⬜ |
 
 **端到端管线**:
@@ -59,7 +59,7 @@ harmful / generic_safe ─► [hooks] mean-pool ─► [vectors] 差分+剪枝 �
 | `src/data.py` | 统一 loader,manifest 驱动,只读不采样 | `load_category_split(dataset, category, safe_source)` | jsonl → `CategorySplit` |
 | `src/hooks.py` | Eq.1 的 `act(x)`:钩激活 + 跨 token 均值 | `extract_activations(model, tok, texts, layers, use_response=)` | `texts` → `{layer:(N,hidden)}` |
 | `src/vectors.py` | Eq.1 差分 + §3.3 剪枝 | `compute_steering_vectors(safe, harmful, prune=)` | 激活 → `SteeringVectors{layer:(hidden,)}` |
-| `src/steering.py` ⬜ | Eq.2 注入(可加/可拆 hook) | _待实现_ | ω + m → steered 前向 |
+| `src/steering.py` | Eq.2 注入(可加/可拆 hook) | `SteeringHook(model, vectors, multiplier)` / `apply_steering(...)` | ω + m → steered 前向 |
 | `scripts/test_load.py` | 验证模型加载 + 单层钩子结构 | `python scripts/test_load.py qwen3\|llama\|gemma` | — |
 | `scripts/prepare_data.py` | 从 HF 缓存抽确定性子集(seed=0) | `python scripts/prepare_data.py` | HF 缓存 → `data/processed/` + `manifest.json` |
 
@@ -84,6 +84,13 @@ harmful / generic_safe ─► [hooks] mean-pool ─► [vectors] 差分+剪枝 �
 **模块 3 `src/vectors.py`** — Eq.1 + §3.3:
 - **vanilla**:`ω = mean(safe) − mean(harmful)`,每层一个 `(hidden,)`。
 - **L2 剪枝复现取舍**:论文为**配对数据**写"pairwise 差→取范数中位数→留 top-50%→均值"。我们用**非配对**generic safe,改取 `d_i = mu_safe − harmful_i` → 留 `‖d_i‖ > median` 的一半 → 均值。依据:① 与论文 rationale 吻合(差异小=低信息=丢弃);② 自洽(不剪枝时全体均值 == vanilla ω);③ 确定性。已在 docstring 标为 documented deviation。
+
+**模块 4 `src/steering.py`** — Eq.2 注入:
+- **改输出而非改权重**:Eq.2 字面是改 `θ^attn`(权重),我们用 forward hook 改 self_attn **输出** `h_l += m·ω_l`(每 token 位置加同一向量)。两者等价,但 hook 不动权重、退出 `with` 即刻拆除(Principle V:可 toggle)。是 refusal_direction/CAA 的标准做法。
+- **同一子层**:注入点与 `hooks.py` 提取点是同一个 `self_attn`(论文要求 same layer)。
+- **dtype/device 对齐**:ω 落盘是 fp32/CPU,注入时转成激活的 dtype+device(模型多为 bf16/cuda)。
+- **m 可正可负**:复现论文 multiplier 范围;负 m = 反向转向。
+- **self-test 要点**:`python src/steering.py` 验证 ① 注入改变输出;② 退出 `with` 后无残留(可拆);③ m=0 恒等;④ **线性性**——小 m 下 +m/−m 扰动余弦 = −1.0000、10× m → 10× 扰动幅度(直接证明 `h+=m·ω` 的线性结构);⑤ 多层注入。纯 CPU。
 
 ---
 
