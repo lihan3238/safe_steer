@@ -22,42 +22,6 @@
   "paper_note": "CatQA and BeaverTails each use their OWN 3 representative categories (Table 1/2); categories are NOT mapped across datasets. Only 'Hate' overlaps and may be compared across datasets.",
   "artifacts": [
     {
-      "path": "data/processed/catqa/adult_content.harmful.jsonl",
-      "dataset": "CatQA",
-      "source": "declare-lab/CategoricalHarmfulQA",
-      "source_file": "/home/lihan/.cache/huggingface/datasets/CategoricalHarmfulQA/data/catqa_english.json",
-      "category_slug": "adult_content",
-      "category_native": "Adult Content",
-      "role": "harmful",
-      "n_requested": 200,
-      "n_available": 50,
-      "n_actual": 50
-    },
-    {
-      "path": "data/processed/catqa/hate_harass_violence.harmful.jsonl",
-      "dataset": "CatQA",
-      "source": "declare-lab/CategoricalHarmfulQA",
-      "source_file": "/home/lihan/.cache/huggingface/datasets/CategoricalHarmfulQA/data/catqa_english.json",
-      "category_slug": "hate_harass_violence",
-      "category_native": "Hate/Harass/Violence",
-      "role": "harmful",
-      "n_requested": 200,
-      "n_available": 46,
-      "n_actual": 46
-    },
-    {
-      "path": "data/processed/catqa/physical_harm.harmful.jsonl",
-      "dataset": "CatQA",
-      "source": "declare-lab/CategoricalHarmfulQA",
-      "source_file": "/home/lihan/.cache/huggingface/datasets/CategoricalHarmfulQA/data/catqa_english.json",
-      "category_slug": "physical_harm",
-      "category_native": "Physical Harm",
-      "role": "harmful",
-      "n_requested": 200,
-      "n_available": 50,
-      "n_actual": 50
-    },
-    {
       "path": "data/processed/beavertails/child_abuse.harmful.jsonl",
       "dataset": "BeaverTails",
       "source": "PKU-Alignment/BeaverTails",
@@ -65,7 +29,7 @@
       "category_slug": "child_abuse",
       "category_native": "child_abuse",
       "role": "harmful",
-      "n_requested": 200,
+      "n_requested": 1500,
       "n_available": 81,
       "n_actual": 81
     },
@@ -77,7 +41,7 @@
       "category_slug": "terrorism_organized_crime",
       "category_native": "terrorism,organized_crime",
       "role": "harmful",
-      "n_requested": 200,
+      "n_requested": 1500,
       "n_available": 188,
       "n_actual": 188
     },
@@ -89,9 +53,9 @@
       "category_slug": "hate_speech_offensive",
       "category_native": "hate_speech,offensive_language",
       "role": "harmful",
-      "n_requested": 200,
+      "n_requested": 1500,
       "n_available": 1226,
-      "n_actual": 200
+      "n_actual": 1226
     },
     {
       "path": "data/processed/beavertails/generic_safe.jsonl",
@@ -101,9 +65,9 @@
       "category_slug": "generic",
       "category_native": "safe",
       "role": "generic_safe",
-      "n_requested": 200,
+      "n_requested": 1500,
       "n_available": 4555,
-      "n_actual": 200
+      "n_actual": 1500
     },
     {
       "path": "data/processed/alpaca/generic_safe.jsonl",
@@ -113,9 +77,9 @@
       "category_slug": "generic",
       "category_native": "n/a",
       "role": "generic_safe",
-      "n_requested": 500,
+      "n_requested": 1500,
       "n_available": 52002,
-      "n_actual": 500
+      "n_actual": 1500
     }
   ]
 }
