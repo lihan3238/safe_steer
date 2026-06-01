@@ -85,6 +85,7 @@ harmful / generic_safe ─► [hooks] mean-pool ─► [vectors] 差分+剪枝 �
 **`scripts/prepare_data.py`** — 离线一次性:HF 缓存 → `data/processed/*.jsonl` + `manifest.json`(确定性子集,seed=0)。
 **`scripts/test_load.py`** — 冒烟:`python scripts/test_load.py qwen3|llama|gemma`,验证模型加载 + 单层钩子结构。
 **`scripts/extract_activations.py`** — 编排 data→hooks,真实模型激活落盘(详见下)。
+**`scripts/extract_vectors.py`** — 编排 hooks→vectors:读 `{harmful,safe}.pt` → `compute_steering_vectors` → 存 ω 到 `vectors/<m>/<ds>/<cat>/{vanilla,pruned}.pt`。纯 CPU。`--prune --report` 打印每层 ‖ω‖ 及 vanilla↔pruned 余弦。
 
 ### `extract_activations.py` 与它的 `.pt` 产物
 
