@@ -344,7 +344,7 @@ Wrote manifest: data/manifest.json (8 artifacts)
 |---|---|---|---|---|---|
 | 1 | 取数据、按数据集×类别组装"有害侧 + 通用安全侧" | §4.1 | `src/data.py` | `data/processed/*.jsonl` → `CategorySplit{harmful, generic_safe}` | ✅ |
 | 2 | 抽 attention 子层 activation,跨 token 求均值,每输入每层一个向量 | Eq.1 的 `act(x)` | `src/hooks.py` | `texts:list[str]` → `{layer: (N, hidden)}` | ✅ |
-| 3 | 差分均值得转向向量 ω = mean(safe) − mean(unsafe);可选 L2 范数剪枝 | Eq.1 + §3.3 | `src/vectors.py` | `safe (N,h)`, `unsafe (N,h)` → `{layer: (hidden,)}` | ⬜ |
+| 3 | 差分均值得转向向量 ω = mean(safe) − mean(unsafe);可选 L2 范数剪枝 | Eq.1 + §3.3 | `src/vectors.py` | `safe (N,h)`, `unsafe (N,h)` → `{layer: (hidden,)}` | ✅ |
 | 4 | 推理时把 ω 按层注入 self-attention 输出:`h_l += m·ω_l` | Eq.2 | `src/steering.py` | `ω{layer:(hidden,)}` + `m` → 钩住前向、改写 `h_l` | ⬜ |
 | 5 | 评测:steered vs naive 的 %UR(unsafe rate)下降 + 文本质量 | §4.4 | `scripts/eval_steering.py` | 生成文本 → `%UR↓`, helpfulness/coherence | ⬜ |
 
@@ -364,6 +364,12 @@ harmful / generic_safe ──► [hooks] mean-pool ──► [vectors] 差分+�
 - transformers 5.x 健壮性:`self_attn` 输出可能是 tuple 或 tensor,统一取 hidden 并**断言最后一维 == hidden_size**,结构若变即刻报错而非污染向量。
 
 **自测(不需 GPU/大模型)**:`python src/hooks.py` 用一个微型随机权重 Llama 验证 ① 输出形状 `(N, hidden)`;② `mean_pool` 对 padding 不敏感(padded == unpadded);③ `use_response` 开关确实改变 activation。
+
+**模块 3 关键点(`src/vectors.py`,对照 Eq.1 + §3.3)**:
+
+- **vanilla(Eq.1)**:`ω = mean(safe) − mean(harmful)`,每层一个 `(hidden,)`,指向"有害→安全"方向(推理时相加即把生成推向安全区)。
+- **L2 剪枝(§3.3)复现取舍**:论文为**配对数据**写"pairwise 差 → 取 L2 范数中位数 → 留 top-50% → 求均值"。我们用**非配对、不等量**的 generic safe,无法逐对相减,故取 `d_i = mu_safe − harmful_i`(每个有害样本对安全均值的差)→ 留 `‖d_i‖ > median` 的一半 → 求均值。**依据**:① 与论文 rationale 吻合(差异小=模型难解缠该有害特征=低信息,丢弃);② 自洽——不剪枝时全体 `d_i` 均值恰等于 vanilla ω,剪枝只是限制到高范数半区;③ 确定性、无随机配对。已在 `src/vectors.py` docstring 标为 documented deviation(宪法 Principle I)。
+- **自测**:`python src/vectors.py` 用合成张量**精确对拍**——vanilla 出 `[1,2]`;剪枝 norms{1,2,3,4}→median 2.5→留 3,4→`[-3.5,0]`;且"不剪枝全体均值==vanilla ω";含 save/load 往返。纯 CPU,无需模型。
 
 ---
 
