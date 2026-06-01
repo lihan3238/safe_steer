@@ -152,16 +152,20 @@ def extract_activations(
     use_response=False,
     batch_size=8,
     base_model=None,
+    progress=None,
 ) -> dict[int, torch.Tensor]:
     """Eq. 1 act(x): one mean-pooled (hidden,) vector per input per layer.
 
     Returns {layer: (N, hidden)} on CPU float32, in input order. N == len(texts).
+    `progress`, if given, is called as progress(done, total) after each batch
+    (lightweight, no tqdm dependency).
     """
     device = next(model.parameters()).device
     layers = list(layers)
     per_layer: dict[int, list[torch.Tensor]] = {l: [] for l in layers}
+    total = len(texts)
 
-    for start in range(0, len(texts), batch_size):
+    for start in range(0, total, batch_size):
         batch_texts = texts[start:start + batch_size]
         batch_resp = (responses[start:start + batch_size] if responses else None)
         inputs = build_inputs(
@@ -176,6 +180,8 @@ def extract_activations(
             for layer in layers:
                 pooled = mean_pool(hook.captured[layer], inputs["attention_mask"])
                 per_layer[layer].append(pooled.float().cpu())
+        if progress is not None:
+            progress(min(start + batch_size, total), total)
 
     return {layer: torch.cat(chunks, dim=0) for layer, chunks in per_layer.items()}
 

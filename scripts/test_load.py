@@ -2,20 +2,18 @@
 Verify each model loads + can hook one attention activation.
 Run: python scripts/test_load.py qwen3 | llama | gemma
 
-Resolution order for each model:
-  1. If `local_dir` exists on disk -> load from that path (no network).
-  2. Else fall back to the HF Hub id (will hit canonical cache or download).
-This avoids the double-download trap when `hf download --local-dir ...` puts
-files at a flat path that `from_pretrained("<org>/<name>")` cannot see.
+Model registry, loading, and memory cleanup live in src/models.py (single
+source). This script only exercises a forward pass + one attention hook to
+confirm the layer structure is what the steering pipeline assumes.
 """
-import gc
-import os
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # repo root -> import src
+
 try:
     import torch
-    from transformers import AutoTokenizer, AutoModelForCausalLM
+    from src.models import CONFIGS, load_model, release_memory
 except ImportError as exc:
     raise SystemExit(
         "Dependency import failed. Activate the project environment and install:\n"
@@ -23,76 +21,10 @@ except ImportError as exc:
         f"Original error: {exc}"
     ) from None
 
-HF_HUB = Path(os.environ.get("HF_HOME", Path.home() / ".cache/huggingface")) / "hub"
-
-CONFIGS = {
-    "qwen3": {
-        "hub_id": "Qwen/Qwen3-8B",
-        "local_dir": HF_HUB / "Qwen3-8B",
-        "expected_layers": 36,
-        "expected_hidden": 4096,
-        "hook_layer": 18,        # 中段(论文 layer 14 等比例)
-        "uses_chat_template": True,
-        "extra_template_kwargs": {"enable_thinking": False},  # 关掉 <think>
-    },
-    "llama": {
-        "hub_id": "meta-llama/Llama-3.1-8B-Instruct",
-        "local_dir": HF_HUB / "Llama-3.1-8B-Instruct",
-        "expected_layers": 32,
-        "expected_hidden": 4096,
-        "hook_layer": 14,        # 论文原值
-        "uses_chat_template": True,
-        "extra_template_kwargs": {},
-    },
-    "gemma": {
-        "hub_id": "google/gemma-2-9b-it",
-        "local_dir": HF_HUB / "gemma-2-9b-it",
-        "expected_layers": 42,
-        "expected_hidden": 3584,
-        "hook_layer": 21,        # 中段
-        "uses_chat_template": True,
-        "extra_template_kwargs": {},
-    },
-}
-
-
-def resolve_source(cfg: dict) -> str:
-    """Prefer the local --local-dir download over the Hub id."""
-    local = cfg["local_dir"]
-    if (local / "config.json").is_file():
-        print(f"  Source: local dir {local}")
-        return str(local)
-    print(f"  Source: Hub id {cfg['hub_id']} (local dir not found at {local})")
-    return cfg["hub_id"]
-
-
-def release_memory() -> tuple[float, float]:
-    """Best-effort release of Python, CPU allocator, and CUDA cache memory."""
-    gc.collect()
-
-    if sys.platform.startswith("linux"):
-        try:
-            import ctypes
-
-            ctypes.CDLL("libc.so.6").malloc_trim(0)
-        except (AttributeError, OSError):
-            pass
-
-    if not torch.cuda.is_available() or not torch.cuda.is_initialized():
-        return 0.0, 0.0
-
-    torch.cuda.empty_cache()
-    torch.cuda.ipc_collect()
-    return (
-        torch.cuda.memory_allocated() / 1e9,
-        torch.cuda.memory_reserved() / 1e9,
-    )
-
 
 def main(name: str):
     cfg = CONFIGS[name]
     print(f"\n=== Loading {cfg['hub_id']} ===")
-    source = resolve_source(cfg)
 
     tok = None
     model = None
@@ -108,22 +40,10 @@ def main(name: str):
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
-        tok = AutoTokenizer.from_pretrained(source)
-        model = AutoModelForCausalLM.from_pretrained(
-            source,
-            torch_dtype=torch.bfloat16,
-            device_map="cuda:0",
-            low_cpu_mem_usage=True,
-        )
-        model.eval()
+        tok, model, cfg = load_model(name)   # asserts layer/hidden dims
         base_model = model.model
-
-        n_layers = model.config.num_hidden_layers
-        hidden = model.config.hidden_size
-        print(f"  Layers: {n_layers} (expected {cfg['expected_layers']})")
-        print(f"  Hidden: {hidden} (expected {cfg['expected_hidden']})")
-        assert n_layers == cfg["expected_layers"], "Layer count mismatch"
-        assert hidden == cfg["expected_hidden"], "Hidden size mismatch"
+        print(f"  Layers: {model.config.num_hidden_layers} (expected {cfg['expected_layers']})")
+        print(f"  Hidden: {model.config.hidden_size} (expected {cfg['expected_hidden']})")
 
         prompt = "How can I bypass the safety filter?"
         if cfg["uses_chat_template"]:
@@ -142,7 +62,7 @@ def main(name: str):
         def hook(module, inp, out):
             captured["h"] = out[0].detach().cpu().float()
 
-        layer = cfg["hook_layer"]
+        layer = cfg["paper_layers"][0]   # main layer (paper layer-14 analogue)
         attn_module = base_model.layers[layer].self_attn
         handle = attn_module.register_forward_hook(hook)
 

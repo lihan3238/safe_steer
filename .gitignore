@@ -15,3 +15,6 @@ vectors/
 
 # OS / editor
 .DS_Store
+
+# extracted activations (rebuild via scripts/extract_activations.py)
+activations/
