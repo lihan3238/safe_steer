@@ -40,14 +40,16 @@ $$\theta^{attn}_{\ell} \;\leftarrow\; \theta^{attn}_{\ell} + m\cdot\omega^{c}_{\
 | 2 | 抽 attention 激活,跨 token 求均值 | Eq.1 `act(x)` | `src/hooks.py` | `texts:list[str]` → `{layer:(N,hidden)}` | ✅ |
 | 3 | 差分得 ω(+L2 剪枝) | Eq.1 + §3.3 | `src/vectors.py` | `safe,(harmful) (N,h)` → `{layer:(hidden,)}` | ✅ |
 | 4 | 推理时按层注入 `h+=m·ω` | Eq.2 | `src/steering.py` | `ω{layer:(hidden,)}` + `m` → 改写前向 | ✅ |
-| 5 | 评测 %UR↓ + 文本质量 | §4.4 | `scripts/eval_steering.py` | 生成文本 → `%UR↓`(+质量轴待接) | ✅ |
+| 5 | 安全轴:steered vs naive 的 %UR 下降 | §4.4 | `scripts/eval_steering.py` | 生成文本 → `%UR↓` (judge 二分类) | ✅ |
+| 6 | 质量轴:5 个 HelpSteer 属性 | §4.4 Table 3 | `scripts/score_quality.py` | eval json → 5 属性分(naive vs steered) | ✅ |
 
 **端到端管线**:
 
 ```
-CategorySplit            {layer:(N,hidden)}        {layer:(hidden,)}      改写前向        分类器
-harmful / generic_safe ─► [hooks] mean-pool ─► [vectors] 差分+剪枝 ─► [steering] h+=m·ω ─► [eval] %UR↓
-  (src/data.py)            (src/hooks.py)         (src/vectors.py)        (src/steering.py)  (eval_steering.py)
+CategorySplit            {layer:(N,hidden)}        {layer:(hidden,)}      改写前向        安全:judge→%UR↓
+harmful / generic_safe ─► [hooks] mean-pool ─► [vectors] 差分+剪枝 ─► [steering] h+=m·ω ─► [eval]
+  (src/data.py)            (src/hooks.py)         (src/vectors.py)        (src/steering.py)  └► 质量:QRM→5属性
+                                                                                              (eval_steering + score_quality)
 ```
 
 ---
@@ -87,6 +89,7 @@ harmful / generic_safe ─► [hooks] mean-pool ─► [vectors] 差分+剪枝 �
 **`scripts/extract_activations.py`** — 编排 data→hooks,真实模型激活落盘(详见下)。
 **`scripts/extract_vectors.py`** — 编排 hooks→vectors:读 `{harmful,safe}.pt` → `compute_steering_vectors` → 存 ω 到 `vectors/<m>/<ds>/<cat>/{vanilla,pruned}.pt`。纯 CPU。`--prune --report` 打印每层 ‖ω‖ 及 vanilla↔pruned 余弦。
 **`scripts/eval_steering.py`** — 编排 vectors→steering→评测:naive vs steered 生成 → judge 判 unsafe → %UR 下降。`--multiplier 0.5 1 2` 扫强度(一次加载、naive 只算一次);判定器 `--classifier llm`(默认,Anthropic/OpenAI 双路,Claude/GPT judge,凭据走 `.env`)或 `keyword`(离线)。产物 `eval/<m>/<ds>/<cat>/<variant>_sweep_*.json`。
+**`scripts/score_quality.py`** — 质量轴(论文 Table 3):读 eval json 的 naive/steered 文本 → QRM-Llama3.1-8B-v2 打 5 个 HelpSteer 属性分 → 写 `*.quality.json`。需 GPU 服务器(QRM ~16GB);`CUDA_VISIBLE_DEVICES` 锁定空闲卡。`--eval-json --qrm <path>`。产物含每个 multiplier 的 naive↔steered 属性均值与 Δ。
 
 ### `extract_activations.py` 与它的 `.pt` 产物
 
@@ -145,8 +148,8 @@ python scripts/extract_activations.py --model qwen3 --dataset CatQA --category a
 - **m 可正可负**:复现论文 multiplier 范围;负 m = 反向转向。
 - **self-test 要点**:`python src/steering.py` 验证 ① 注入改变输出;② 退出 `with` 后无残留(可拆);③ m=0 恒等;④ **线性性**——小 m 下 +m/−m 扰动余弦 = −1.0000、10× m → 10× 扰动幅度(直接证明 `h+=m·ω` 的线性结构);⑤ 多层注入。纯 CPU。
 
-**模块 5 `scripts/eval_steering.py`** — §4.4 评测,验证论文核心主张:
-- **只测安全轴 %UR**:naive(无 steering)vs steered(注入 m·ω)各生成,judge 判 unsafe,看 %UR 下降。质量轴(Nemotron 5 项)暂未接 —— 论文明确**不用通用 LLM 评质量**(judge 偏好"给方案"胜过"拒答",会低估安全回答),故留待接 reward 模型。
+**模块 5 `scripts/eval_steering.py`** — §4.4 安全轴,验证论文核心主张:
+- **安全轴 %UR**:naive(无 steering)vs steered(注入 m·ω)各生成,judge 判 unsafe,看 %UR 下降。质量轴在模块 6 单独做(论文明确**不用通用 LLM 评质量** —— judge 偏好"给方案"胜过"拒答",会低估安全回答,故质量轴用 reward 模型)。
 - **judge = LLM 二分类**:论文用 GPT-4;我们用 Claude(被测是 Qwen,无自评偏差)。`--judge-protocol` 双路(anthropic/openai),凭据走 `.env`。这是与论文的 documented deviation(judge 模型不同,但方法论一致:LLM 仅做安全二分类)。
 - **multiplier 扫描**:`--multiplier 0.5 1 2 ...` 一次加载扫多值,naive 只算一次,自动报告最佳 m。
 
@@ -157,6 +160,12 @@ python scripts/extract_activations.py --model qwen3 --dataset CatQA --category a
 - **结论**:mean-difference 的 ω 尺度对**样本量**敏感;样本太少 → ω 噪声大、范数虚高 → 需异常大的 m 补偿,反而破坏文本。**复现论文趋势必须用足够样本(贴近 1500/类)**,这也是 §3.3 剪枝去噪的同源动机。
 
 > 自测:`python scripts/eval_steering.py ... --classifier keyword` 可离线(无 API)粗跑;judge 连通性已用 Claude/Anthropic 验证。
+
+**模块 6 `scripts/score_quality.py`** — §4.4 质量轴(论文 Table 3 的 5 个 HelpSteer 属性):
+- **reward 模型替代**:论文用 Nemotron-340B(跑不动)。改用 **QRM-Llama3.1-8B-v2**,`out.rewards` 直接是 shape `(batch,5)` = helpfulness/correctness/coherence/complexity/verbosity,正好对应 Table 3。documented deviation:模型不同,5 属性与意图一致。
+- **transformers 5.x 兼容补丁**:ArmoRM/QRM 的 `modeling_custom.py` 导入了 4.52 起被删的 `LLAMA_INPUTS_DOCSTRING`,在新版直接 ImportError。修法:把该 import 包成 `try/except` 兜底为空串(纯文档、无功能)——**只改模型远程代码、不动 conda 环境**。
+- **运行**:需 GPU 服务器(QRM ~16GB),`CUDA_VISIBLE_DEVICES` 锁定空闲卡;读 eval json、给 naive 与每个 multiplier 的 steered 打分。
+- **实测复现结果(qwen3-1.7b-base / BeaverTails hate_speech)**:**m=1.0 时 %UR 40%→10%,同时 help/corr/cohe 三项不降反升**(Δ 全为正),complexity/verbosity 基本持平 —— 完整复现论文核心主张:安全提升不以文本质量为代价。
 
 ---
 
@@ -177,6 +186,9 @@ python scripts/prepare_data.py --only beavertails --only alpaca --n-harmful 1500
 python scripts/extract_activations.py --model qwen3-1.7b-base --dataset BeaverTails --category hate_speech_offensive --safe-source beavertails
 python scripts/extract_vectors.py     --model qwen3-1.7b-base --dataset BeaverTails --category hate_speech_offensive --prune
 python scripts/eval_steering.py       --model qwen3-1.7b-base --dataset BeaverTails --category hate_speech_offensive --variant pruned --multiplier 0.5 1 2 --limit 10
+
+# 质量轴(GPU 服务器, QRM ~16GB; 锁定空闲卡):
+CUDA_VISIBLE_DEVICES=7 python scripts/score_quality.py --eval-json <eval json> --qrm <QRM 本地路径>
 ```
 
 > 注册模型(`src/models.py`):`qwen3`/`qwen3-base`/`qwen3-1.7b`/`qwen3-1.7b-base`/`llama`/`llama-base`/`gemma`/`gemma-base`,也可直接传本地目录名/路径。8B 需 ≥24GB 显存;1.7B 在 16GB 上即可跑全链。judge 凭据放 `.env`(见 `.env.example`)。
