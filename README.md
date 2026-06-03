@@ -90,7 +90,7 @@ harmful / generic_safe ─► [hooks] mean-pool ─► [vectors] 差分+剪枝 �
 **`scripts/test_load.py`** — 冒烟:`python scripts/test_load.py qwen3|llama|gemma`,验证模型加载 + 单层钩子结构。
 **`scripts/extract_activations.py`** — 编排 data→hooks,真实模型激活落盘(详见下)。
 **`scripts/extract_vectors.py`** — 编排 hooks→vectors:读 `{harmful,safe}.pt` → `compute_steering_vectors` → 存 ω 到 `vectors/<m>/<ds>/<cat>/{vanilla,pruned}.pt`。纯 CPU。`--prune --report` 打印每层 ‖ω‖ 及 vanilla↔pruned 余弦。
-**`scripts/eval_steering.py`** — 编排 vectors→steering→评测:naive vs steered 生成 → judge 判 unsafe → %UR 下降。`--multiplier 0.5 1 2` 扫强度(一次加载、naive 只算一次);判定器 `--classifier llm`(默认,Anthropic/OpenAI 双路,Claude/GPT judge,凭据走 `.env`)或 `keyword`(离线)。产物 `eval/<m>/<ds>/<cat>/<variant>_sweep_*.json`。
+**`scripts/eval_steering.py`** — 编排 vectors→steering→评测:naive vs steered 生成 → judge 判 unsafe → %UR 下降。`--multiplier 0.5 1 2` 扫强度(一次加载、naive 只算一次);`--vec-model` 解耦 ω 来源(跨模型迁移,如 chat→base);判定器 `--classifier llm`(默认,Anthropic/OpenAI 双路,Claude/GPT judge,凭据走 `.env`)或 `keyword`(离线)。产物 `eval/<m>/<ds>/<cat>/<variant>_sweep_*.json`。
 **`scripts/score_quality.py`** — 质量轴(论文 Table 3):读 eval json 的 naive/steered 文本 → QRM-Llama3.1-8B-v2 打 5 个 HelpSteer 属性分 → 写 `*.quality.json`。需 GPU 服务器(QRM ~16GB);`CUDA_VISIBLE_DEVICES` 锁定空闲卡。`--eval-json --qrm <path>`。产物含每个 multiplier 的 naive↔steered 属性均值与 Δ。
 
 ### `extract_activations.py` 与它的 `.pt` 产物
@@ -171,6 +171,12 @@ python scripts/extract_activations.py --model qwen3 --dataset CatQA --category a
 - 两个规模**方向一致**(m=1.0 时 %UR 下降、抽检确认真转向、文本连贯),核心主张复现成立。
 - 8B 降幅(+10)比 1.7B(+30)温和,且质量出现**轻微 trade-off**(help/corr 降 ~0.03):① `limit=10` 统计噪声大(50%/40% 仅差 1 个样本);② 8B base 激活更扩散、ω 范数更小、更难 steer。这与论文一致 —— 论文也指出维持质量在某些模型上更难、安全与质量本是 trade-off。**要论文级强结果需放大 test 规模(论文用 150/类)**,这是后续工作,不影响"机制有效"的结论。
 
+**chat→base 迁移(论文 §3.3 技巧一)— 复现了机制,但 Qwen3 上效果为负**:
+- 论文做法:从 **chat 模型**提 ω(safe/unsafe 概念更分离、方向更纯)→ 注入 **base 模型**生成,声称比 base 自提取质量更高、拒答更少。我们用 `eval_steering.py --vec-model` 解耦 ω 来源实现:`--model Qwen3-8B-Base --vec-model Qwen3-8B-chat`。
+- **结果(8B,同上设置)**:base→base 是 50%→40%(+10);**chat→base 反而 40%→60%(m=1.0,drop −20),各 multiplier 全为负**。抽检:chat 的 ω 注入 base 后**生成几乎不变**(steered≈naive),即 chat 的 ω 在 base 上**方向失效**。
+- **诚实解读**:`--vec-model` 机制工作正常(日志确认在用 chat 的 ω 注入 base),但**迁移效果与论文相反**。原因推测:论文是 **Llama-2-7B-chat → Llama-2-7B**(chat 由 base 微调而来、激活空间高度对齐);我们是 **Qwen3-8B-chat(post-trained) → Qwen3-8B-Base**,两者训练差异更大、激活空间对齐弱,chat 的 ω 迁到 base "水土不服"。**结论:跨模型 steering 迁移的有效性强依赖两模型激活空间的对齐程度**(见 §5)。
+
+
 > 自测:`python scripts/eval_steering.py ... --classifier keyword` 可离线(无 API)粗跑;judge 连通性已用 Claude/Anthropic 验证。
 
 
@@ -194,6 +200,7 @@ python scripts/extract_activations.py --model qwen3 --dataset CatQA --category a
 4. **质量评测受限于 reward 模型**。论文用 Nemotron-340B,我们用 QRM-8B 替代 —— 分数尺度不同,只能比趋势不能比绝对值。且 reward 模型本身有偏。可探索:多个 reward 模型交叉验证,或人工小样本校准。
 5. **multiplier 与文本崩坏的边界未刻画**。m 太大时 %UR 看似下降,实为文本崩成乱码被 judge 误判 safe。当前靠人工看文本区分。可探索:加一个**自动的"文本退化检测"**(重复率/困惑度/连贯性)作为 steering 的安全护栏,把"真转向"与"崩坏"自动分开。
 6. **safe 数据来源的影响未系统对比**。论文有 paired-safe / generic-safe 之分,我们因 CatQA twin 未公开只用了 generic(Alpaca/BeaverTails-safe)。可探索:系统对比不同 safe 来源对 ω 方向与 %UR↓ 的影响。
+7. **跨模型 ω 迁移的有效性依赖激活空间对齐**(实测发现)。论文的 chat→base 迁移在 Llama-2(chat 由 base 微调、激活对齐)上有效;我们在 Qwen3-8B(chat 是 post-trained、与 base 训练差异大)上复现,迁移**失效甚至变负**(chat 的 ω 注入 base 几乎不改变生成)。可探索:用激活空间对齐度(如 CKA / 子空间夹角)**预测**两模型间 ω 是否可迁移,而非默认"同尺寸即可迁"。
 
 ---
 

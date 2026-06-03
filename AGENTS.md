@@ -71,40 +71,34 @@ When in doubt about whether a card is free or whether an action could affect som
 
 ### Network proxy (temporary use only, leave no trace)
 
-Outbound proxy for network calls: `http://10.77.0.11:10808`.
+Outbound proxy: `http://10.77.0.11:10808`. On the shared servers use it **only
+per-command, never persisted** — a lingering proxy address is a privacy leak
+others would inherit:
 
-On the shared servers it MUST be used **only transiently, per-command** — never
-persisted, never leaving a trace that could leak privacy:
-
-- Apply it **per-command only**, e.g.
+- Inline per command, e.g.
   `https_proxy=http://10.77.0.11:10808 http_proxy=http://10.77.0.11:10808 hf download ...`
-- Do NOT `export` it into the shell session beyond the single command, and do NOT
-  write it into `~/.bashrc`, `~/.profile`, `git config`, `~/.config`, pip/conda
-  config, `/etc/environment`, or any dotfile on the server.
-- After use, ensure no proxy setting lingers in shell history or config. Prefer
-  one-shot inline env vars that vanish when the command returns.
-- Rationale: these are shared machines; a persisted proxy address is both a
-  privacy leak and a footprint other users should not inherit.
+- Never `export` it session-wide, and never write it into `~/.bashrc`,
+  `git config`, pip/conda config, `/etc/environment`, or any dotfile.
+- Leave no trace in shell history or config after use.
 
 ### Inter-machine file transfer (local <-> servers, server <-> server)
 
 For moving models / data / results between machines on the LAN (`10.77.0.x`):
 
-- **Prefer `rsync` over `scp`**: it resumes partial transfers (`--partial`/
-  `--inplace`), skips already-identical files, and is far less painful when a
-  16GB model transfer is interrupted.
-- **Do NOT route LAN transfers through the proxy.** The proxy is for *outbound
-  internet* only; LAN-to-LAN must go direct. Explicitly clear proxy vars for the
-  transfer, e.g.:
-  `env -i bash -c 'rsync -a --partial SRC/ host:DST/'` or `unset *_proxy` first.
-  A proxy-polluted shell can silently tunnel a local copy through the proxy and
-  make it crawl.
-- Example (resume a model copy):
-  `rsync -a --partial --inplace ~/.cache/huggingface/hub/<Model>/ hello@10.77.0.101:~/.workplace/models/<Model>/`
-- Reuse what a machine already has before copying/redownloading (省流量): check
-  each host's HF cache and `~/.workplace` first. Note a cached dir can be a
-  gated *empty shell* (only metadata, ~KB) — verify real weight size, not just
-  that the directory exists.
+- **Prefer `rsync` over `scp`** — it resumes partial transfers
+  (`--partial --inplace`) and skips identical files.
+- **Do NOT route LAN transfers through the proxy** (it's for outbound internet
+  only). Clear proxy vars first (`unset *_proxy`); a proxy-polluted shell
+  silently tunnels the local copy through the proxy and crawls.
+- **Use an absolute remote path, not `~`** — `~` may expand locally and `mkdir`
+  fails. Example:
+  `rsync -a --partial --inplace <SRC>/ dell@10.77.0.102:/home/dell/.workplace/models/<Model>/`
+- Reuse what a host already has before re-copying (省流量): check its HF cache
+  and `~/.workplace`. A gated cache dir can be an *empty shell* (~KB metadata) —
+  verify real weight size, not just that the dir exists.
+- **rsync has slow-start**; judge speed after ~30s. Measured here: **dell rsync
+  ~40MB/s ≫ hello / proxy ~4-8MB/s** — dell is the fast hub, prefer it for bulk
+  pulls. (hf-mirror and the `10.81.2.14:3128` proxy were unreachable for HF.)
 
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
