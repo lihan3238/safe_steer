@@ -2,6 +2,8 @@
 
 > 从零复现 Fine-grained SafeSteer (EMNLP 2025 main #1781, [arXiv 2506.04250](https://arxiv.org/abs/2506.04250))。论文无开源代码。本仓是**学习笔记 + 最小可跑复现**:把论文方法的**原理流**和代码的**数据流**两条线对齐,帮助理解 SafeSteer。
 >
+> **复现状态:初步复现完成** ✅ — 核心机制(Eq.1/Eq.2/§3.3)+ 安全轴 %UR + 质量轴 5 属性全部打通,并在 qwen3-1.7b-base 与 qwen3-8b-base 两个规模上验证了论文核心主张(steered %UR 下降、真转向、文本连贯;详见 §4 实测表)。Baseline 对比(CAA/SEA)本轮搁置(原因见 §4)。
+>
 > 配套:论文细节笔记 `lihan_notes/.../04_safety_steering_repe/Fine-grained SafeSteer.md` · PDF 在 `papers/agent_security_2026/04_safety_steering_repe/`。
 
 ---
@@ -159,7 +161,18 @@ python scripts/extract_activations.py --model qwen3 --dataset CatQA --category a
 - 改用 BeaverTails hate_speech **1226 样本** 重算 → ω 范数回落(深层 18、浅层 2.3,接近激活尺度)→ **m=1.0 即最佳**(%UR 40%→10%,真转向、文本连贯)、回到论文 multiplier 范围。
 - **结论**:mean-difference 的 ω 尺度对**样本量**敏感;样本太少 → ω 噪声大、范数虚高 → 需异常大的 m 补偿,反而破坏文本。**复现论文趋势必须用足够样本(贴近 1500/类)**,这也是 §3.3 剪枝去噪的同源动机。
 
+**两个规模的实测验证(均 BeaverTails hate_speech,pruned,m=1.0 最佳)**:
+
+| 模型 | naive %UR | steered %UR | drop | 质量轴(QRM 5 属性) | 备注 |
+|---|---|---|---|---|---|
+| **qwen3-1.7b-base** | 40% | **10%** | +30 | help/corr/cohe 不降反升(Δ>0) | limit=10,降幅大、零质量代价 |
+| **qwen3-8b-base** | 50% | **40%** | +10 | help/corr 轻微降(Δ≈−0.03)、cohe 基本平 | limit=10,方向对但温和、有轻微 trade-off |
+
+- 两个规模**方向一致**(m=1.0 时 %UR 下降、抽检确认真转向、文本连贯),核心主张复现成立。
+- 8B 降幅(+10)比 1.7B(+30)温和,且质量出现**轻微 trade-off**(help/corr 降 ~0.03):① `limit=10` 统计噪声大(50%/40% 仅差 1 个样本);② 8B base 激活更扩散、ω 范数更小、更难 steer。这与论文一致 —— 论文也指出维持质量在某些模型上更难、安全与质量本是 trade-off。**要论文级强结果需放大 test 规模(论文用 150/类)**,这是后续工作,不影响"机制有效"的结论。
+
 > 自测:`python scripts/eval_steering.py ... --classifier keyword` 可离线(无 API)粗跑;judge 连通性已用 Claude/Anthropic 验证。
+
 
 **模块 6 `scripts/score_quality.py`** — §4.4 质量轴(论文 Table 3 的 5 个 HelpSteer 属性):
 - **reward 模型替代**:论文用 Nemotron-340B(跑不动)。改用 **QRM-Llama3.1-8B-v2**,`out.rewards` 直接是 shape `(batch,5)` = helpfulness/correctness/coherence/complexity/verbosity,正好对应 Table 3。documented deviation:模型不同,5 属性与意图一致。
@@ -167,9 +180,24 @@ python scripts/extract_activations.py --model qwen3 --dataset CatQA --category a
 - **运行**:需 GPU 服务器(QRM ~16GB),`CUDA_VISIBLE_DEVICES` 锁定空闲卡;读 eval json、给 naive 与每个 multiplier 的 steered 打分。
 - **实测复现结果(qwen3-1.7b-base / BeaverTails hate_speech)**:**m=1.0 时 %UR 40%→10%,同时 help/corr/cohe 三项不降反升**(Δ 全为正),complexity/verbosity 基本持平 —— 完整复现论文核心主张:安全提升不以文本质量为代价。
 
+**Baseline 对比(CAA / SEA)— 暂时搁置**:论文 Table 3 还含 CAA(Rimsky 2023)、SEA(Qiu 2024)两个对照方法。它们是**别人的方法,不并入本仓的 SafeSteer 复现代码**(避免污染)。调研结论:两个官方源码均**无法直接跑** —— 都硬编码 Llama-2 + 旧数据格式,且 pin 的 `torch 2.0.x` 不支持 RTX 5090(Blackwell sm_120),连"建旧环境跑"都被 GPU 堵死;移植≈在新栈重写核心算法(CAA ~8-16h、SEA ~12-20h)。故本轮搁置。未来若补,应在**独立子目录/模块**最小重实现(CAA=last-token diff-of-means+残差注入;线性 SEA=cross-cov+SVD+投影),绝不混入 SafeSteer 代码。
+
 ---
 
-## 5. 快速上手
+## 5. 潜在改进点(复现中发现)
+
+复现过程中撞见的、论文一笔带过或未涉及、但有研究价值的点。既是这套方法的**脆弱面**,也是可探索的方向:
+
+1. **ω 尺度对样本量极敏感(方法隐含前提)**。50 样本算的 ω 范数虚高(深层 ≈99 ≫ 激活尺度 ~13),逼得 multiplier 异常大、反而把文本推崩;1226 样本后范数回落、m≈1 即生效。论文用 1500/类不是随意 —— 但**论文没强调这是方法 work 的前提**。可探索:ω 的自适应尺度归一化(注意:论文 Eq.2 本身不归一化,加了即偏离),或用"达到稳定方向所需的最小样本量"刻画方法的数据效率。
+2. **层选择缺乏跨模型的原则**。论文层 `{14,16,20,25,31}` 只在 Llama 验证;我们按"比例位置"迁到 Qwen/Gemma 只是**起点猜测**。可探索:用"该层 harmful/safe 激活可分性"(如线性探针精度、ω 范数峰值)**自动选层**,而非手工比例换算。
+3. **多标签噪声直接污染类别向量**。BeaverTails 一条 prompt 挂多个有害标签,某些类样本少且主题漂移,稀释 ω 纯度。论文靠大样本 + L2 剪枝冲淡,但未根治。可探索:单标签过滤 / 标签置信度加权 / 更强的去噪(如鲁棒均值)。
+4. **质量评测受限于 reward 模型**。论文用 Nemotron-340B,我们用 QRM-8B 替代 —— 分数尺度不同,只能比趋势不能比绝对值。且 reward 模型本身有偏。可探索:多个 reward 模型交叉验证,或人工小样本校准。
+5. **multiplier 与文本崩坏的边界未刻画**。m 太大时 %UR 看似下降,实为文本崩成乱码被 judge 误判 safe。当前靠人工看文本区分。可探索:加一个**自动的"文本退化检测"**(重复率/困惑度/连贯性)作为 steering 的安全护栏,把"真转向"与"崩坏"自动分开。
+6. **safe 数据来源的影响未系统对比**。论文有 paired-safe / generic-safe 之分,我们因 CatQA twin 未公开只用了 generic(Alpaca/BeaverTails-safe)。可探索:系统对比不同 safe 来源对 ω 方向与 %UR↓ 的影响。
+
+---
+
+## 6. 快速上手
 
 ```bash
 conda activate safesteer313                 # py3.13 / torch2.12+cu130 / transformers5.9
@@ -195,7 +223,7 @@ CUDA_VISIBLE_DEVICES=7 python scripts/score_quality.py --eval-json <eval json> -
 
 ---
 
-## 6. 参考
+## 7. 参考
 
 - **论文**:[Fine-grained SafeSteer (arXiv 2506.04250)](https://arxiv.org/abs/2506.04250)
 - **可借鉴 repo**:[andyrdt/refusal_direction](https://github.com/andyrdt/refusal_direction)(diff-of-means + hook 骨架) · [nrimsky/CAA](https://github.com/nrimsky/CAA)(CAA 基线) · [Yuqi-Qiu/SEA](https://github.com/Yuqi-Qiu/SEA)(SEA 基线)
