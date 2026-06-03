@@ -29,6 +29,62 @@ For every new/changed `src/*.py` or `scripts/*.py`, before committing:
 
 Keep rows terse and aligned with the code's real signatures. If a file is deleted/renamed, fix every section that references it (no stale rows).
 
+## Compute / GPU Servers
+
+Two pre-configured remote servers are available for GPU runs (the local WSL box
+has only a single RTX 5070 Ti, 16GB — fine for ≤1.7B models, not for 8B+).
+
+| Host | SSH | Usable GPUs |
+|---|---|---|
+| `hello` | `hello@10.77.0.101` | **1× RTX 5090** (the only card; use it) |
+| `dell` | `dell@10.77.0.102` | **only cards 6 and 7** of 8 — set `CUDA_VISIBLE_DEVICES=6` or `7` (or `6,7`). Cards 0–5 are off-limits. |
+
+### Working directory (servers)
+
+On BOTH servers, do ALL work strictly under `~/.workplace/`. Create it if it
+does not exist (`mkdir -p ~/.workplace`) and keep every clone, download, output,
+and scratch file inside it. Do not write project files anywhere else in the
+server's home or filesystem.
+
+### Conda environments (servers)
+
+Use only project-owned envs. Never install into, modify, or run jobs from a
+pre-existing env unless the user explicitly designates it.
+
+- **`dell`**: project env exists at `~/miniconda3/envs/safesteer`. Run with
+  `~/miniconda3/bin/conda run -n safesteer ...`.
+- **`hello`**: project env exists at `~/.workplace/conda/envs/safesteer`. Run
+  with `~/.workplace/conda/envs/safesteer/bin/python ...`.
+
+### Hard rule: shared machines — never disturb other users' jobs
+
+These servers are SHARED. Before launching anything on a GPU you MUST:
+
+1. **Check occupancy first**: run `nvidia-smi` (or `nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv`) and inspect running processes. On `dell`, check cards 6 and 7 specifically.
+2. **Only use a card that is free** (no other user's process, ample free memory). If your allowed card(s) are busy, WAIT or ask — do NOT preempt, kill, or crowd another job.
+3. **Pin your device explicitly** with `CUDA_VISIBLE_DEVICES` so a run can never spill onto a card you are not allowed to use (especially the 0–5 range on `dell`).
+4. **Never** kill, suspend, throttle, or reduce the memory headroom of any process you did not start. Causing even slight interference with another user's run is not acceptable.
+5. Size your own job (batch size, model size, parallelism) to fit comfortably within the free memory on your allowed card(s), leaving margin.
+
+When in doubt about whether a card is free or whether an action could affect someone else, stop and ask the user rather than risk interference.
+
+### Network proxy (temporary use only, leave no trace)
+
+Outbound proxy for network calls: `http://10.77.0.11:10808`.
+
+On the shared servers it MUST be used **only transiently, per-command** — never
+persisted, never leaving a trace that could leak privacy:
+
+- Apply it **per-command only**, e.g.
+  `https_proxy=http://10.77.0.11:10808 http_proxy=http://10.77.0.11:10808 hf download ...`
+- Do NOT `export` it into the shell session beyond the single command, and do NOT
+  write it into `~/.bashrc`, `~/.profile`, `git config`, `~/.config`, pip/conda
+  config, `/etc/environment`, or any dotfile on the server.
+- After use, ensure no proxy setting lingers in shell history or config. Prefer
+  one-shot inline env vars that vanish when the command returns.
+- Rationale: these are shared machines; a persisted proxy address is both a
+  privacy leak and a footprint other users should not inherit.
+
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
 shell commands, and other important information, read the current plan
