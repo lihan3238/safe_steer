@@ -73,6 +73,10 @@ def parse_args():
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", required=True, metavar="NAME_OR_PATH",
                    help="registered model (%s) or a local dir/path" % "|".join(CONFIGS))
+    p.add_argument("--vec-model", default=None, metavar="NAME_OR_PATH",
+                   help="model whose omega to inject (default: --model). Set to a "
+                        "different model to test cross-model transfer, e.g. extract "
+                        "omega from a chat model and steer the base model (paper Sec. 3.3).")
     p.add_argument("--dataset", required=True, choices=["CatQA", "BeaverTails"])
     p.add_argument("--category", required=True)
     p.add_argument("--variant", default="vanilla", choices=["vanilla", "pruned"])
@@ -214,15 +218,17 @@ def generate(model, tokenizer, prompt, cfg, max_new_tokens):
 def main():
     args = parse_args()
 
-    # load omega
-    vec_path = Path(args.vec_root) / args.model / args.dataset / args.category / f"{args.variant}.pt"
+    # load omega -- from --vec-model if set (cross-model transfer), else --model
+    vec_model = args.vec_model or args.model
+    vec_path = Path(args.vec_root) / vec_model / args.dataset / args.category / f"{args.variant}.pt"
     if not vec_path.exists():
         raise SystemExit(f"missing {vec_path}\nRun scripts/extract_vectors.py first.")
     sv = SteeringVectors.load(vec_path)
     layers = args.layers if args.layers is not None else sv.layers()
     vectors = {l: sv.vectors[l] for l in layers}
     multipliers = args.multiplier
-    print(f"omega: {vec_path.name}  layers={layers}  multipliers={multipliers}")
+    transfer = " (transfer: omega from %s)" % vec_model if args.vec_model else ""
+    print(f"omega: {vec_path.name}  layers={layers}  multipliers={multipliers}{transfer}")
 
     # harmful test prompts (paper uses the test split; we reuse the prepared subset)
     split = load_category_split(args.dataset, args.category)
@@ -279,7 +285,7 @@ def main():
             })
 
         summary = {
-            "model": args.model, "dataset": args.dataset, "category": args.category,
+            "model": args.model, "vec_model": vec_model, "dataset": args.dataset, "category": args.category,
             "variant": args.variant, "layers": layers, "classifier": args.classifier,
             "judge_model": args.judge_model if args.classifier == "llm" else None,
             "n": n, "ur_naive_pct": ur_naive,
@@ -294,7 +300,9 @@ def main():
         out_dir = Path(args.out_root) / args.model / args.dataset / args.category
         out_dir.mkdir(parents=True, exist_ok=True)
         ms = "_".join(str(m) for m in multipliers)
-        out_path = out_dir / f"{args.variant}_sweep_m{ms}.json"
+        # tag transfer runs so they don't overwrite the same-model result
+        tag = f"_from-{Path(vec_model).name}" if args.vec_model else ""
+        out_path = out_dir / f"{args.variant}_sweep_m{ms}{tag}.json"
         out_path.write_text(json.dumps(
             {"summary": summary,
              "naive_rows": [{"prompt": p, "naive": t, "unsafe_naive": u}
