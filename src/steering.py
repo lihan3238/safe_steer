@@ -5,15 +5,17 @@ The generation loop (sampling, batching, %UR scoring) lives in
 scripts/eval_steering.py.
 
 Paper Eq. 2:  theta^attn_l  <-  theta^attn_l + m * omega_l
-The paper phrases this as modifying the self-attention weights. We implement the
-equivalent, cleaner intervention: a forward hook on the SAME self_attn module
-that hooks.py reads from, rewriting its OUTPUT hidden state at every token
-position:
+The paper phrases this as modifying the self-attention weights "at all token
+positions", which is the activation-steering form used by refusal_direction / CAA:
+add a constant vector to a layer's activation at every position. We add omega to
+the RESIDUAL STREAM (the decoder layer's output hidden state), the same place
+hooks.py reads from:
         h_l  <-  h_l + m * omega_l
-Adding a constant vector to every position of the attention output is equivalent
-to adding it through the projection, but it touches no weights and detaches
-instantly on context exit (Principle V: steering must toggle cleanly). This is
-the standard activation-steering form used by refusal_direction / CAA.
+The residual stream is where behaviour is linearly encoded; steering it is what
+actually moves generation. (Adding the same vector to the small-norm attention
+sublayer output instead is ~15x too weak to steer -- see hooks.py.) This touches
+no weights and detaches instantly on context exit (Principle V: steering must
+toggle cleanly).
 
 `m` (multiplier) scales strength and may be negative (reverse steering), to
 sweep the paper's multiplier range.
@@ -25,10 +27,10 @@ from __future__ import annotations
 import torch
 
 
-def _split_attn_output(out):
+def _split_layer_output(out):
     """Return (hidden_state, rebuild) so we can rewrite hidden and restore shape.
 
-    self_attn forward returns either a tensor or a tuple (hidden, *rest).
+    A decoder layer's forward returns either a tensor or a tuple (hidden, *rest).
     `rebuild(new_hidden)` puts a modified hidden back into the original form.
     """
     if isinstance(out, torch.Tensor):
@@ -37,13 +39,13 @@ def _split_attn_output(out):
         rest = tuple(out[1:])
         return out[0], (lambda new: (new, *rest))
     raise TypeError(
-        f"unexpected self_attn output type {type(out)!r}; "
+        f"unexpected decoder-layer output type {type(out)!r}; "
         "transformers layout may have changed -- inspect before steering"
     )
 
 
 class SteeringHook:
-    """Context manager that injects m * omega_l into self_attn output per layer.
+    """Context manager that injects m * omega_l into the residual stream per layer.
 
     Usage:
         with SteeringHook(model, {14: omega14}, multiplier=0.5):
@@ -51,7 +53,8 @@ class SteeringHook:
         # hooks auto-removed here -> model back to naive
 
     `vectors`: {layer: (hidden,)}. `base_model` defaults to model.model
-    (Llama/Qwen/Gemma decoder stack: base_model.layers[i].self_attn).
+    (Llama/Qwen/Gemma decoder stack: base_model.layers[i]). The hook rewrites
+    each decoder layer's OUTPUT (the residual stream after that layer).
     """
 
     def __init__(self, model, vectors: dict[int, torch.Tensor], multiplier: float,
@@ -71,7 +74,7 @@ class SteeringHook:
 
     def _make_hook(self, omega: torch.Tensor):
         def hook(_module, _inp, out):
-            hidden, rebuild = _split_attn_output(out)
+            hidden, rebuild = _split_layer_output(out)
             # match dtype/device: omega is saved as fp32/cpu, model may be bf16/cuda
             delta = self.multiplier * omega.to(dtype=hidden.dtype, device=hidden.device)
             return rebuild(hidden + delta)   # broadcasts over (batch, seq, hidden)
@@ -79,8 +82,8 @@ class SteeringHook:
 
     def __enter__(self) -> "SteeringHook":
         for layer, omega in self.vectors.items():
-            attn = self.base_model.layers[layer].self_attn
-            self._handles.append(attn.register_forward_hook(self._make_hook(omega)))
+            block = self.base_model.layers[layer]
+            self._handles.append(block.register_forward_hook(self._make_hook(omega)))
         return self
 
     def __exit__(self, *exc) -> None:

@@ -1,30 +1,35 @@
-"""Attention-activation extraction for SafeSteer (paper Eq. 1, the `act(x)` term).
+"""Activation extraction for SafeSteer (paper Eq. 1, the `act(x)` term).
 
 MECHANISM ONLY. Iterating over a dataset and writing vectors to disk is the job
 of scripts/extract_activations.py; this module just provides the hook + pooling.
 
-Paper Eq. 1: act(x) runs x through the model, reads a layer's self-attention
-sublayer output, and averages over all tokens -> one (hidden,) vector per input
-per layer. We keep ONE vector per input (not a pre-averaged sum) so the L2-norm
-pruning of Sec. 3.3 and the t-SNE disentanglement plots stay possible.
+Paper Eq. 1: act(x) runs x through the model, reads a layer's activation, and
+averages over all tokens -> one (hidden,) vector per input per layer. We read the
+RESIDUAL STREAM (the decoder layer's output hidden state), not the self-attention
+sublayer output: the residual stream is where behaviour is linearly encoded and
+where CAA / refusal_direction (the methods the paper builds on) compute and inject
+their steering vectors. The attention sublayer output has a much smaller norm
+(~15x smaller at mid layers on Llama-3-8B), so a vector built from it is too weak
+to actually steer generation when added back into the residual stream. We keep
+ONE vector per input (not a pre-averaged sum) so the L2-norm pruning of Sec. 3.3
+and the t-SNE disentanglement plots stay possible.
 
 Data-structure flow:
     texts (list[str])
         | tokenize (right-padded extraction batch)
         v
     input_ids (B, seq)  +  attention_mask (B, seq)
-        | forward; forward-hooks on self_attn of each requested layer
+        | forward; forward-hooks on each requested decoder layer
         v
-    captured {layer: (B, seq, hidden)}      <- attention sublayer output
+    captured {layer: (B, seq, hidden)}      <- residual stream (layer output)
         | mean over REAL tokens (mask-weighted; padding excluded)
         v
     {layer: (B, hidden)}  -> accumulated across batches ->
     {layer: (N, hidden)}                     <- this module's product
 
-transformers 5.x note: a decoder layer's self_attn may return a tuple
-(attn_out, ...) or a bare tensor. We normalise both and assert the last dim ==
-hidden_size, so a silent structure change surfaces immediately instead of
-poisoning the vectors.
+transformers 5.x note: a decoder layer returns a tuple (hidden, ...) or a bare
+tensor. We normalise both and assert the last dim == hidden_size, so a silent
+structure change surfaces immediately instead of poisoning the vectors.
 
 Run `python src/hooks.py` for a self-test on a tiny random model (no download,
 no GPU needed).
@@ -36,32 +41,33 @@ from typing import Iterable
 import torch
 
 
-def _hidden_from_attn_output(out) -> torch.Tensor:
-    """Pull the hidden-state tensor out of a self_attn forward output.
+def _hidden_from_layer_output(out) -> torch.Tensor:
+    """Pull the hidden-state tensor out of a decoder-layer forward output.
 
-    transformers attention modules return either a tensor or a tuple whose
-    first element is the hidden state. Anything else is an error we want loud.
+    transformers decoder layers return either a tensor or a tuple whose first
+    element is the hidden state. Anything else is an error we want loud.
     """
     if isinstance(out, torch.Tensor):
         return out
     if isinstance(out, (tuple, list)) and out and isinstance(out[0], torch.Tensor):
         return out[0]
     raise TypeError(
-        f"unexpected self_attn output type {type(out)!r}; "
+        f"unexpected decoder-layer output type {type(out)!r}; "
         "transformers layout may have changed -- inspect before trusting vectors"
     )
 
 
-class AttentionActivationHook:
-    """Context manager that captures self_attn output at the given layers.
+class LayerActivationHook:
+    """Context manager that captures the residual stream at the given layers.
 
     Usage:
-        with AttentionActivationHook(model, [14, 18]) as hook:
+        with LayerActivationHook(model, [14, 18]) as hook:
             model(input_ids=..., attention_mask=..., use_cache=False)
             acts = hook.captured        # {14: (B, seq, H), 18: (B, seq, H)}
 
     `base_model` defaults to model.model (Llama/Qwen/Gemma decoder stack:
-    base_model.layers[i].self_attn). Pass a different accessor if a model nests
+    base_model.layers[i]). The hook reads each decoder layer's OUTPUT, i.e. the
+    residual stream after that layer. Pass a different accessor if a model nests
     its layers elsewhere.
     """
 
@@ -75,7 +81,7 @@ class AttentionActivationHook:
 
     def _make_hook(self, layer: int):
         def hook(_module, _inp, out):
-            h = _hidden_from_attn_output(out)
+            h = _hidden_from_layer_output(out)
             if h.shape[-1] != self.hidden_size:
                 raise ValueError(
                     f"layer {layer}: captured last-dim {h.shape[-1]} != hidden "
@@ -84,10 +90,10 @@ class AttentionActivationHook:
             self.captured[layer] = h.detach()
         return hook
 
-    def __enter__(self) -> "AttentionActivationHook":
+    def __enter__(self) -> "LayerActivationHook":
         for layer in self.layers:
-            attn = self.base_model.layers[layer].self_attn
-            self._handles.append(attn.register_forward_hook(self._make_hook(layer)))
+            block = self.base_model.layers[layer]
+            self._handles.append(block.register_forward_hook(self._make_hook(layer)))
         return self
 
     def __exit__(self, *exc) -> None:
@@ -175,7 +181,7 @@ def extract_activations(
         inputs = build_inputs(
             tokenizer, batch_texts, batch_resp, use_response=use_response, device=device
         )
-        with AttentionActivationHook(model, layers, base_model=base_model) as hook:
+        with LayerActivationHook(model, layers, base_model=base_model) as hook:
             model(
                 input_ids=inputs["input_ids"],
                 attention_mask=inputs.get("attention_mask"),
