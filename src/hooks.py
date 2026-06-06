@@ -10,7 +10,7 @@ pruning of Sec. 3.3 and the t-SNE disentanglement plots stay possible.
 
 Data-structure flow:
     texts (list[str])
-        | tokenize (left-padded batch)
+        | tokenize (right-padded extraction batch)
         v
     input_ids (B, seq)  +  attention_mask (B, seq)
         | forward; forward-hooks on self_attn of each requested layer
@@ -109,11 +109,12 @@ def mean_pool(activation: torch.Tensor, attention_mask: torch.Tensor) -> torch.T
 
 
 def build_inputs(tokenizer, texts, responses=None, use_response=False, device="cpu"):
-    """Tokenise a batch as a left-padded {input_ids, attention_mask}.
+    """Tokenise an extraction-only batch as right-padded inputs.
 
     use_response=True appends the response (when present) so the activation is
     over the {prompt, response} pair (paper Sec. 3.1); default is prompt-only.
-    Uses the chat template when the tokenizer defines one.
+    Uses the chat template when the tokenizer defines one. Do not reuse this
+    helper for generation; decoder-only generation should build its own inputs.
     """
     rendered = []
     responses = responses or [None] * len(texts)
@@ -133,6 +134,9 @@ def build_inputs(tokenizer, texts, responses=None, use_response=False, device="c
     # gives each token the same activation whether or not the batch is padded.
     # (Generation uses LEFT padding to align the last token at -1; that is a
     # different module's concern -- see eval_steering. Don't mix the two.)
+    # Llama tokenizers ship without a pad_token; fall back to eos (standard).
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
     prev_side = tokenizer.padding_side
     tokenizer.padding_side = "right"
     try:

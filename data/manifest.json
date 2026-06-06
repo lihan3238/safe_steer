@@ -80,6 +80,42 @@
       "n_requested": 1500,
       "n_available": 52002,
       "n_actual": 1500
+    },
+    {
+      "path": "data/processed/catqa/adult_content.harmful.jsonl",
+      "dataset": "CatQA",
+      "source": "declare-lab/CategoricalHarmfulQA",
+      "source_file": "(restored from on-disk processed file)",
+      "category_slug": "adult_content",
+      "category_native": "Adult Content",
+      "role": "harmful",
+      "n_requested": 200,
+      "n_available": 50,
+      "n_actual": 50
+    },
+    {
+      "path": "data/processed/catqa/hate_harass_violence.harmful.jsonl",
+      "dataset": "CatQA",
+      "source": "declare-lab/CategoricalHarmfulQA",
+      "source_file": "(restored from on-disk processed file)",
+      "category_slug": "hate_harass_violence",
+      "category_native": "Hate/Harass/Violence",
+      "role": "harmful",
+      "n_requested": 200,
+      "n_available": 46,
+      "n_actual": 46
+    },
+    {
+      "path": "data/processed/catqa/physical_harm.harmful.jsonl",
+      "dataset": "CatQA",
+      "source": "declare-lab/CategoricalHarmfulQA",
+      "source_file": "(restored from on-disk processed file)",
+      "category_slug": "physical_harm",
+      "category_native": "Physical Harm",
+      "role": "harmful",
+      "n_requested": 200,
+      "n_available": 50,
+      "n_actual": 50
     }
   ]
 }

@@ -2,7 +2,9 @@
 
 > 从零复现 Fine-grained SafeSteer (EMNLP 2025 main #1781, [arXiv 2506.04250](https://arxiv.org/abs/2506.04250))。论文无开源代码。本仓是**学习笔记 + 最小可跑复现**:把论文方法的**原理流**和代码的**数据流**两条线对齐,帮助理解 SafeSteer。
 >
-> **复现状态:初步复现完成** ✅ — 核心机制(Eq.1/Eq.2/§3.3)+ 安全轴 %UR + 质量轴 5 属性全部打通,并在 qwen3-1.7b-base 与 qwen3-8b-base 两个规模上验证了论文核心主张(steered %UR 下降、真转向、文本连贯;详见 §4 实测表)。Baseline 对比(CAA/SEA)本轮搁置(原因见 §4)。
+> **复现状态:初步复现完成** ✅ — 核心机制(Eq.1/Eq.2/§3.3)+ 安全轴 %UR + 质量轴 5 属性全部打通,并在 qwen3-1.7b-base 与 qwen3-8b-base 两个规模上验证了论文核心主张(steered %UR 下降、真转向、文本连贯;详见 §4 实测表)。
+>
+> **数值对齐论文的深挖结论**(在论文确切模型 Meta-Llama-3-8B + 确切设定上):论文头条 87.5→**0** 是 **self-steer + CatQA**(非 chat→base 迁移);我们**复现了高 naive 前提**(98/88/89% ≈ 论文 87.5/80/92.5)与方向性降幅,但**论文的 →0 卡在判官标定**——同一批文本严格判官 100% vs 论文对齐判官 35%,论文 →0 依赖 GPT-4 的特定宽容标定 + 安全↔连贯权衡,非单纯 steering 之力(详见 §4 头条复现块 / §5 第 8-10 条)。Baseline 对比(CAA/SEA)本轮搁置(原因见 §4)。
 >
 > 配套:论文细节笔记 `lihan_notes/.../04_safety_steering_repe/Fine-grained SafeSteer.md` · PDF 在 `papers/agent_security_2026/04_safety_steering_repe/`。
 
@@ -67,6 +69,7 @@ harmful / generic_safe ─► [hooks] mean-pool ─► [vectors] 差分+剪枝 �
 
 **`src/data.py`** — 数据"统一取货口",manifest 驱动、只读、不采样。
 - `load_category_split(dataset, category, safe_source)` → `CategorySplit{harmful, generic_safe}`(一个类别的有害侧 + 安全侧,都是 `Example` 文本记录)。
+- `is_refusal(text)` + `REFUSAL_MARKERS`:子串匹配判断回答是否为拒答(论文 §3.3 技巧二的 safe 集精炼用,供 `extract_activations.py --safe-filter refusal`)。
 - 采样/打乱只发生在 `prepare_data.py`(固定 seed),loader 只读,保证确定性来源唯一。
 - `python src/data.py` 自测(纯 CPU)。
 
@@ -90,7 +93,7 @@ harmful / generic_safe ─► [hooks] mean-pool ─► [vectors] 差分+剪枝 �
 **`scripts/test_load.py`** — 冒烟:`python scripts/test_load.py qwen3|llama|gemma`,验证模型加载 + 单层钩子结构。
 **`scripts/extract_activations.py`** — 编排 data→hooks,真实模型激活落盘(详见下)。
 **`scripts/extract_vectors.py`** — 编排 hooks→vectors:读 `{harmful,safe}.pt` → `compute_steering_vectors` → 存 ω 到 `vectors/<m>/<ds>/<cat>/{vanilla,pruned}.pt`。纯 CPU。`--prune --report` 打印每层 ‖ω‖ 及 vanilla↔pruned 余弦。
-**`scripts/eval_steering.py`** — 编排 vectors→steering→评测:naive vs steered 生成 → judge 判 unsafe → %UR 下降。`--multiplier 0.5 1 2` 扫强度(一次加载、naive 只算一次);`--vec-model` 解耦 ω 来源(跨模型迁移,如 chat→base);判定器 `--classifier llm`(默认,Anthropic/OpenAI 双路,Claude/GPT judge,凭据走 `.env`)或 `keyword`(离线)。产物 `eval/<m>/<ds>/<cat>/<variant>_sweep_*.json`。
+**`scripts/eval_steering.py`** — 编排 vectors→steering→评测:naive vs steered 生成 → judge 判 unsafe → %UR 下降。`--multiplier 0.5 1 2` 扫强度(一次加载、naive 只算一次,自动报最佳 m);`--layers` 指定注入层(单层=该层,多层=同时注入)。`--vec-model` 解耦 ω 来源(跨模型迁移,如 chat→base)。**解码**:默认 greedy,base 模型务必加 `--do-sample [--temperature 0.7 --top-p 0.9]`(否则退化成复读,见 §5)。**判官**:`--classifier llm`(默认,Anthropic/OpenAI 双路,凭据走 `.env`)或 `keyword`(离线);`--judge-workers 16` 并行判官(网关慢时把判官阶段从 ~60min 压到 ~5min);判官调用带 5 次退避重试(一次超时不再作废整轮)。产物 `<variant>_sweep_*.json`(含每条 naive/steered 文本,供事后换判官重判)。
 **`scripts/score_quality.py`** — 质量轴(论文 Table 3):读 eval json 的 naive/steered 文本 → QRM-Llama3.1-8B-v2 打 5 个 HelpSteer 属性分 → 写 `*.quality.json`。需 GPU 服务器(QRM ~16GB);`CUDA_VISIBLE_DEVICES` 锁定空闲卡。`--eval-json --qrm <path>`。产物含每个 multiplier 的 naive↔steered 属性均值与 Δ。
 
 ### `extract_activations.py` 与它的 `.pt` 产物
@@ -98,17 +101,17 @@ harmful / generic_safe ─► [hooks] mean-pool ─► [vectors] 差分+剪枝 �
 ```bash
 python scripts/extract_activations.py --model qwen3 --dataset CatQA --category adult_content \
     [--layers 18 16 ...] [--safe-source alpaca|beavertails] [--use-response] \
-    [--batch-size 8] [--limit N] [--dry-run]
+    [--safe-filter none|refusal] [--batch-size 8] [--limit N] [--dry-run]
 ```
 
-做的事:取 `CategorySplit`(有害 + 安全文本)→ 加载模型 → 两侧各跑 `extract_activations` → 落盘。`--dry-run` 不加载模型,只验证数据/路径/层(零显存)。
+做的事:取 `CategorySplit`(有害 + 安全文本)→ 加载模型 → 两侧各跑 `extract_activations` → 落盘。`--dry-run` 不加载模型,只验证数据/路径/层(零显存)。`--safe-filter refusal`(论文 §3.3 技巧二):把 safe 集筛成 response 含拒答的样本(`src/data.py:is_refusal` 子串匹配),令 ω 指向"拒答方向"而非"安全话题"(隐含开启 `--use-response`)。
 
 产物 `activations/<model>/<dataset>/<category>/{harmful,safe}.pt`,每个是:
 
 ```python
 {
   "acts": {18: Tensor(N, hidden), 16: ..., ...},  # 每层一个激活矩阵;float32/CPU
-  "meta": {model, hub_id, dataset, category, safe_source, layers, use_response, role, n},
+  "meta": {model, hub_id, dataset, category, safe_source, layers, use_response, safe_filter, role, n},
 }
 ```
 
@@ -177,7 +180,13 @@ python scripts/extract_activations.py --model qwen3 --dataset CatQA --category a
 - **诚实解读**:`--vec-model` 机制工作正常(日志确认在用 chat 的 ω 注入 base),但**迁移效果与论文相反**。原因推测:论文是 **Llama-2-7B-chat → Llama-2-7B**(chat 由 base 微调而来、激活空间高度对齐);我们是 **Qwen3-8B-chat(post-trained) → Qwen3-8B-Base**,两者训练差异更大、激活空间对齐弱,chat 的 ω 迁到 base "水土不服"。**结论:跨模型 steering 迁移的有效性强依赖两模型激活空间的对齐程度**(见 §5)。
 
 
-> 自测:`python scripts/eval_steering.py ... --classifier keyword` 可离线(无 API)粗跑;judge 连通性已用 Claude/Anthropic 验证。
+**论文头条复现(self-steer + CatQA + 论文确切模型 Meta-Llama-3-8B)— 方法对、前提复现,但 →0 卡在判官标定**:
+- **设定纠正**:论文 Table 1/2 的 87.5→0 是 **self-steer**(从模型自身提 ω 注回自身,caption 明示)+ **CatQA**(结构化有害问句)+ vanilla(all activations)+ 论文层(Adult/Physical=14、Hate=25)。**不是** chat→base 迁移(那只是 §3.3 提质量技巧)。
+- **前提复现 ✅**:Meta-Llama-3-8B 自我引导 CatQA(采样,n=50),严格判官下 naive %UR = 98%/88%/89%,**与论文 87.5/80/92.5 同量级**;steering 方向正确,高 m 下文本退化/变模糊(印证论文 coherence 同步暴跌:Adult 2.45→1.44 等)。
+- **→0 没复现,根因=判官标定(已隔离)**:同一批 steered 文本,严格判官(沾边即 unsafe)给 %UR=100%、论文对齐判官(只看可操作有害)给 35% —— **判官一个变量就把 %UR 从 100% 拉到 35%**。穷尽 5 层 × m 到 16,steering 自身最多降 +5~+7.5,够不到 →0。论文 →0 依赖 GPT-4 对退化/模糊文本判 safe 的特定标定(详见 §5 第 8 条)。
+- **复现结论**:方法与代码正确、前提条件复现;论文头条 %UR 降幅是 GPT-4 判官标定 + 安全↔连贯权衡的合成产物,而非单纯 steering 之力。
+
+> 自测:`python scripts/eval_steering.py ... --classifier keyword` 可离线(无 API)粗跑;judge 连通性已用 Claude/Anthropic 验证。`--do-sample` 后 base 续写连贯(否则 greedy 退化复读)。
 
 
 **模块 6 `scripts/score_quality.py`** — §4.4 质量轴(论文 Table 3 的 5 个 HelpSteer 属性):
@@ -201,6 +210,9 @@ python scripts/extract_activations.py --model qwen3 --dataset CatQA --category a
 5. **multiplier 与文本崩坏的边界未刻画**。m 太大时 %UR 看似下降,实为文本崩成乱码被 judge 误判 safe。当前靠人工看文本区分。可探索:加一个**自动的"文本退化检测"**(重复率/困惑度/连贯性)作为 steering 的安全护栏,把"真转向"与"崩坏"自动分开。
 6. **safe 数据来源的影响未系统对比**。论文有 paired-safe / generic-safe 之分,我们因 CatQA twin 未公开只用了 generic(Alpaca/BeaverTails-safe)。可探索:系统对比不同 safe 来源对 ω 方向与 %UR↓ 的影响。
 7. **跨模型 ω 迁移的有效性依赖激活空间对齐**(实测发现)。论文的 chat→base 迁移在 Llama-2(chat 由 base 微调、激活对齐)上有效;我们在 Qwen3-8B(chat 是 post-trained、与 base 训练差异大)上复现,迁移**失效甚至变负**(chat 的 ω 注入 base 几乎不改变生成)。可探索:用激活空间对齐度(如 CKA / 子空间夹角)**预测**两模型间 ω 是否可迁移,而非默认"同尺寸即可迁"。
+8. **%UR 这个指标被判官标定主导,而非单纯 steering 之力**(本轮最重要的发现)。在论文确切模型 **Meta-Llama-3-8B** + 确切设定(self-steer + CatQA + 论文层)上,**对同一批 steered 文本**:严格判官(沾边即判 unsafe)给 %UR=100%,论文对齐判官(只看"是否给可操作有害信息")给 35% —— **判官标准一个变量就把 %UR 从 100% 拉到 35%**。论文头条的 87.5→**0** 高度依赖 **GPT-4** 对"被 steer 到退化/模糊但仍沾边"的文本判 safe 的特定标定;我们用 Claude-haiku 在任何标定下都落不到 GPT-4 那个点(严格→偏高、actionable→偏低)。**steering 本身提供的是小而真实的方向性改善(+5~+7.5),论文的 →0 是"安全↔连贯权衡推到极端 + GPT-4 判官宽容"的合成产物** —— 这是论文 glossed over 的脆弱点。可探索:报告 %UR 时同时给"actionable-harm"与"topic-adjacent"两档判官,或用 deterministic 检测(可操作性/退化度)替代单一 LLM 判官。
+9. **论文头条是 self-steer + CatQA,不是 chat→base 迁移**(易踩的复现陷阱)。论文 Table 1/2 的 87.5→0 是**从模型自身提 ω 注回自身**(caption: "used both for computing steering vectors and for evaluation")+ **CatQA 结构化有害问句**;chat→base 迁移只是 §3.3/§5 给 Llama-2-7B-chat 提质量的边角技巧,从来不是 %UR 头条。**复现头条务必锁定 self-steer + CatQA**;在 BeaverTails 口语 prompt + 迁移设定上做会得到"假的低 naive + 无降幅"。
+10. **base 模型必须采样,否则 greedy 退化成复读**(评测陷阱)。base 模型 greedy 解码会退化成复读 prompt 的乱码(naive 输出失真,%UR 变成判官对"复读了有害问题"的噪声);必须 `--do-sample`(temp~0.7)才能让 base 续写连贯、naive %UR 反映真实倾向。论文的连贯 base 续写隐含了采样。
 
 ---
 
@@ -221,6 +233,12 @@ python scripts/prepare_data.py --only beavertails --only alpaca --n-harmful 1500
 python scripts/extract_activations.py --model qwen3-1.7b-base --dataset BeaverTails --category hate_speech_offensive --safe-source beavertails
 python scripts/extract_vectors.py     --model qwen3-1.7b-base --dataset BeaverTails --category hate_speech_offensive --prune
 python scripts/eval_steering.py       --model qwen3-1.7b-base --dataset BeaverTails --category hate_speech_offensive --variant pruned --multiplier 0.5 1 2 --limit 10
+
+# 论文头条设定(self-steer + CatQA;base 模型务必 --do-sample,判官并行加速):
+python scripts/extract_activations.py --model <Meta-Llama-3-8B 路径> --dataset CatQA --category adult_content --safe-source alpaca
+python scripts/extract_vectors.py     --model <Meta-Llama-3-8B 路径> --dataset CatQA --category adult_content --prune
+python scripts/eval_steering.py        --model <Meta-Llama-3-8B 路径> --dataset CatQA --category adult_content \
+    --variant vanilla --layers 14 --multiplier 0.5 1 2 --do-sample --judge-workers 16 --limit 50
 
 # 质量轴(GPU 服务器, QRM ~16GB; 锁定空闲卡):
 CUDA_VISIBLE_DEVICES=7 python scripts/score_quality.py --eval-json <eval json> --qrm <QRM 本地路径>

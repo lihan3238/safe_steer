@@ -39,6 +39,7 @@ import argparse
 import json
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -87,8 +88,18 @@ def parse_args():
     p.add_argument("--classifier", default="llm", choices=["llm", "keyword"])
     p.add_argument("--judge-protocol", default="anthropic", choices=["anthropic", "openai"])
     p.add_argument("--judge-model", default="claude-haiku-4-5-20251001")
+    p.add_argument("--judge-workers", type=int, default=16,
+                   help="concurrent judge API calls (gateway can be slow; "
+                        "parallelism hides per-call latency)")
     p.add_argument("--limit", type=int, default=20, help="number of test prompts")
     p.add_argument("--max-new-tokens", type=int, default=128)
+    p.add_argument("--do-sample", action="store_true",
+                   help="sample instead of greedy decoding. Base models degenerate "
+                        "into repetition loops under greedy; the paper's coherent base "
+                        "completions imply sampling. Pairs with --temperature/--top-p.")
+    p.add_argument("--temperature", type=float, default=0.7)
+    p.add_argument("--top-p", type=float, default=0.9)
+    p.add_argument("--repetition-penalty", type=float, default=1.0)
     p.add_argument("--vec-root", default=str(REPO_ROOT / "vectors"))
     p.add_argument("--out-root", default=str(REPO_ROOT / "eval"))
     return p.parse_args()
@@ -189,12 +200,27 @@ def make_llm_classifier(judge_model: str, protocol: str = "anthropic"):
     else:
         raise SystemExit(f"unknown --judge-protocol {protocol!r} (anthropic|openai)")
 
-    return classify
+    # The judge runs only AFTER all (expensive) generations finish, so a single
+    # transient gateway timeout must not discard the whole run. Wrap the call in
+    # bounded retries with linear backoff; re-raise only if every attempt fails.
+    def classify_with_retry(prompt: str, response: str, _inner=classify) -> bool:
+        last = None
+        for attempt in range(5):
+            try:
+                return _inner(prompt, response)
+            except Exception as e:  # APITimeoutError/APIConnectionError/5xx etc.
+                last = e
+                time.sleep(2 * (attempt + 1))
+        raise last
+
+    return classify_with_retry
 
 
 # --- generation ------------------------------------------------------------
 def build_chat_inputs(tokenizer, prompt, cfg, device):
-    if cfg["uses_chat_template"]:
+    # use the chat template only if the config asks for it AND the tokenizer
+    # actually defines one (base models are sometimes misflagged as chat).
+    if cfg["uses_chat_template"] and tokenizer.chat_template:
         text = tokenizer.apply_chat_template(
             [{"role": "user", "content": prompt}],
             tokenize=False, add_generation_prompt=True, **cfg["extra_template_kwargs"],
@@ -205,11 +231,12 @@ def build_chat_inputs(tokenizer, prompt, cfg, device):
 
 
 @torch.inference_mode()
-def generate(model, tokenizer, prompt, cfg, max_new_tokens):
+def generate(model, tokenizer, prompt, cfg, max_new_tokens, gen_kwargs=None):
     inputs = build_chat_inputs(tokenizer, prompt, cfg, model.device)
     out = model.generate(
-        **inputs, max_new_tokens=max_new_tokens, do_sample=False,
+        **inputs, max_new_tokens=max_new_tokens,
         pad_token_id=tokenizer.pad_token_id or tokenizer.eos_token_id,
+        **(gen_kwargs or {"do_sample": False}),
     )
     gen = out[0, inputs["input_ids"].shape[1]:]
     return tokenizer.decode(gen, skip_special_tokens=True).strip()
@@ -249,35 +276,58 @@ def main():
         tok, model, cfg = load_model(args.model)
 
         # naive generation is steering-independent -> compute once and reuse
+        gen_kwargs = ({"do_sample": True, "temperature": args.temperature,
+                       "top_p": args.top_p, "repetition_penalty": args.repetition_penalty}
+                      if args.do_sample else {"do_sample": False})
+        print(f"  decoding: {'sample '+str(gen_kwargs) if args.do_sample else 'greedy'}")
+
+        # The judge gateway can be slow (10s+/call); judging 100s of texts
+        # sequentially dominates wall-clock. So split the work: generate all
+        # texts on the GPU (sequential), then judge them concurrently in a
+        # thread pool. keyword classifier is instant, so threads are harmless.
+        def judge_all(pairs, label):
+            t0 = time.time()
+            done = [0]
+            def one(pr_txt):
+                u = classify(*pr_txt)
+                done[0] += 1
+                print(f"\r    {label} judge: {done[0]}/{len(pairs)}  "
+                      f"{time.time()-t0:.0f}s", end="", flush=True)
+                return u
+            workers = 1 if args.classifier == "keyword" else args.judge_workers
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                return list(ex.map(one, pairs))
+
+        def gen_all(multiplier, label):
+            t0 = time.time()
+            outs = []
+            for i, prompt in enumerate(prompts):
+                if multiplier is None:
+                    text = generate(model, tok, prompt, cfg, args.max_new_tokens, gen_kwargs)
+                else:
+                    with SteeringHook(model, vectors, multiplier):
+                        text = generate(model, tok, prompt, cfg, args.max_new_tokens, gen_kwargs)
+                outs.append(text)
+                print(f"\r    {label} gen: {i+1}/{n}  {time.time()-t0:.0f}s",
+                      end="", flush=True)
+            print()
+            return outs
+
         print("  naive (no steering):")
-        t0 = time.time()
-        naive_out, naive_unsafe = [], []
-        for i, prompt in enumerate(prompts):
-            text = generate(model, tok, prompt, cfg, args.max_new_tokens)
-            u = classify(prompt, text)
-            naive_out.append(text); naive_unsafe.append(u)
-            print(f"\r    [{i+1}/{n}] unsafe={sum(naive_unsafe)}  {time.time()-t0:.0f}s",
-                  end="", flush=True)
+        naive_out = gen_all(None, "naive")
+        naive_unsafe = judge_all(list(zip(prompts, naive_out)), "naive")
         ur_naive = 100.0 * sum(naive_unsafe) / n
         print(f"\n    %UR naive = {ur_naive:.1f}%")
 
         # sweep multipliers: each only re-generates + judges the steered side
         sweep = []
         for m in multipliers:
-            t0 = time.time()
-            steered_out, steered_unsafe = [], []
-            for i, prompt in enumerate(prompts):
-                with SteeringHook(model, vectors, m):
-                    text = generate(model, tok, prompt, cfg, args.max_new_tokens)
-                u = classify(prompt, text)
-                steered_out.append(text); steered_unsafe.append(u)
-                print(f"\r    m={m}: [{i+1}/{n}] unsafe={sum(steered_unsafe)}  "
-                      f"{time.time()-t0:.0f}s", end="", flush=True)
+            steered_out = gen_all(m, f"m={m}")
+            steered_unsafe = judge_all(list(zip(prompts, steered_out)), f"m={m}")
             ur_steered = 100.0 * sum(steered_unsafe) / n
             drop = ur_naive - ur_steered
             tag = "GOOD" if ur_steered < ur_naive else ("BROKEN?" if ur_steered > ur_naive else "flat")
-            print(f"\r    m={m:<5}: %UR steered={ur_steered:5.1f}%  drop={drop:+5.1f}  [{tag}]"
-                  + " " * 12)
+            print(f"\n    m={m:<5}: %UR steered={ur_steered:5.1f}%  drop={drop:+5.1f}  [{tag}]")
             sweep.append({
                 "multiplier": m, "ur_steered_pct": ur_steered, "ur_drop_pct": drop,
                 "rows": [{"prompt": p, "steered": s, "unsafe_steered": u}

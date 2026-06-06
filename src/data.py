@@ -30,6 +30,31 @@ MANIFEST_PATH = PROJECT_ROOT / "data" / "manifest.json"
 REQUIRED_FIELDS = ("id", "text", "response", "category", "role", "source")
 VALID_ROLES = ("harmful", "generic_safe")
 
+# Paper Sec. 3.3, second refinement: for the chat->base transfer, refine the
+# generic-safe pool to ONLY {prompt, response} pairs whose response is a refusal,
+# so omega points toward "refuse" rather than "safe topic". We detect refusals
+# by substring match against common refusal openers (refusal-direction style,
+# Arditi & Obeso 2023). Deterministic; no API. Used by extract_activations.py
+# via --safe-filter refusal. Requires --use-response (the refusal lives in the
+# response text, not the prompt).
+REFUSAL_MARKERS = (
+    "i cannot", "i can't", "i can not", "i won't", "i will not", "i'm sorry",
+    "i am sorry", "i apologize", "i'm not able to", "i am not able to",
+    "i'm unable", "i am unable", "as an ai", "as a responsible", "i do not",
+    "it is not appropriate", "it's not appropriate", "i must decline",
+    "i'm not going to", "cannot provide", "can't provide", "cannot help",
+    "can't help", "not able to provide", "i refuse", "it is illegal",
+    "it's illegal", "please do not", "i would advise against",
+    "i cannot assist", "i can't assist", "i'm just an ai", "no, i cannot",
+    "no, i can't",
+)
+
+
+def is_refusal(text: str | None) -> bool:
+    """True if `text` reads as a refusal (Sec. 3.3 safe-set refinement)."""
+    tl = (text or "").lower()
+    return any(m in tl for m in REFUSAL_MARKERS)
+
 
 @dataclass(frozen=True)
 class Example:

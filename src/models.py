@@ -86,13 +86,18 @@ def _auto_config(name: str) -> dict:
         )
     c = json.loads(cfg_path.read_text())
     n = c["num_hidden_layers"]
+    # chat only if the dir name signals it (instruct/chat/-it); a base model
+    # like "Llama-3.1-8B" has no chat template, so default to non-chat. The
+    # generation path also double-checks tokenizer.chat_template at runtime.
+    name_l = local.name.lower()
+    is_chat = any(k in name_l for k in ("instruct", "chat", "-it"))
     return {
         "hub_id": name,
         "local_dir": local,
         "expected_layers": n,
         "expected_hidden": c["hidden_size"],
         "paper_layers": paper_layers_for(n),
-        "uses_chat_template": "base" not in local.name.lower(),
+        "uses_chat_template": is_chat,
         "extra_template_kwargs": {},
     }
 

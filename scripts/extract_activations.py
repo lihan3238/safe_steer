@@ -45,6 +45,10 @@ def parse_args():
                    help="layers to hook (default: the model's paper_layers)")
     p.add_argument("--use-response", action="store_true",
                    help="include response in the activation input (default prompt-only)")
+    p.add_argument("--safe-filter", default="none", choices=["none", "refusal"],
+                   help="refine the safe pool (paper Sec. 3.3): 'refusal' keeps only "
+                        "safe pairs whose response is a refusal -> omega points toward "
+                        "refusing, not just safe topic. Implies --use-response.")
     p.add_argument("--batch-size", type=int, default=8)
     p.add_argument("--limit", type=int, default=None,
                    help="cap each side to first N examples (smoke runs)")
@@ -66,10 +70,25 @@ def main():
                          f"(0..{cfg['expected_layers'] - 1})")
 
     split = load_category_split(args.dataset, args.category, safe_source=args.safe_source)
-    harmful = split.harmful[: args.limit] if args.limit else split.harmful
-    safe = split.generic_safe[: args.limit] if args.limit else split.generic_safe
 
-    print(f"model={args.model}  layers={layers}  use_response={args.use_response}")
+    # Sec. 3.3 safe-set refinement: keep only refusal responses (needs the
+    # response text, so force --use-response on). Filter the FULL pool before
+    # the --limit slice so the cap counts refusals, not raw rows.
+    use_response = args.use_response or args.safe_filter == "refusal"
+    safe_pool = split.generic_safe
+    if args.safe_filter == "refusal":
+        from src.data import is_refusal
+        kept = [e for e in safe_pool if is_refusal(e.response)]
+        print(f"  safe-filter=refusal: {len(kept)}/{len(safe_pool)} safe pairs kept")
+        if not kept:
+            raise SystemExit("no refusal responses in safe pool; cannot build omega")
+        safe_pool = kept
+
+    harmful = split.harmful[: args.limit] if args.limit else split.harmful
+    safe = safe_pool[: args.limit] if args.limit else safe_pool
+
+    print(f"model={args.model}  layers={layers}  use_response={use_response}"
+          f"  safe_filter={args.safe_filter}")
     print(f"  {split.summary()}")
     print(f"  using harmful={len(harmful)}  safe={len(safe)}"
           + (f"  (limit={args.limit})" if args.limit else ""))
@@ -92,7 +111,7 @@ def main():
 
         def run(examples, label):
             texts = [e.text for e in examples]
-            resp = [e.response for e in examples] if args.use_response else None
+            resp = [e.response for e in examples] if use_response else None
             t0 = time.time()
 
             def progress(done, total):
@@ -104,7 +123,7 @@ def main():
 
             acts = extract_activations(
                 model, tok, texts, layers,
-                responses=resp, use_response=args.use_response,
+                responses=resp, use_response=use_response,
                 batch_size=args.batch_size, progress=progress,
             )
             print(f"\r    {label}: {len(texts)}/{len(texts)} done in "
@@ -117,7 +136,8 @@ def main():
         meta_common = {
             "model": args.model, "hub_id": cfg["hub_id"], "dataset": args.dataset,
             "category": args.category, "safe_source": args.safe_source,
-            "layers": layers, "use_response": args.use_response,
+            "layers": layers, "use_response": use_response,
+            "safe_filter": args.safe_filter,
         }
         out_dir.mkdir(parents=True, exist_ok=True)
         torch.save({"acts": harmful_acts,
