@@ -30,75 +30,23 @@ For every new/changed `src/*.py` or `scripts/*.py`, before committing:
 
 Keep rows terse and aligned with the code's real signatures. If a file is deleted/renamed, fix every section that references it (no stale rows).
 
-## Compute / GPU Servers
+## Runtime Environment
 
-Two pre-configured remote servers are available for GPU runs (the local WSL box
-has only a single RTX 5070 Ti, 16GB — fine for ≤1.7B models, not for 8B+).
+When this repo is nested under `science_ai`, use the enclosing workspace as the
+shared authority:
 
-| Host | SSH | Usable GPUs |
-|---|---|---|
-| `hello` | `hello@10.77.0.101` | **1× RTX 5090** (the only card; use it) |
-| `dell` | `dell@10.77.0.102` | **only cards 6 and 7** of 8 — set `CUDA_VISIBLE_DEVICES=6` or `7` (or `6,7`). Cards 0–5 are off-limits. |
+- Follow `../../experiments/runbooks/research-claims.md` for
+  reproduction-derived hypotheses, benchmark-gated follow-up ideas, and paper
+  readiness.
+- Follow `../../experiments/runbooks/research-notes.md` for literature,
+  source/code lookup, and novelty checks.
+- Follow `../../experiments/runbooks/research-compute.md` plus the active
+  research profile for paths, remotes, GPU permissions, environments,
+  proxy/download routing, transfers, and judge APIs.
 
-### Working directory (servers)
-
-On BOTH servers, do ALL work strictly under `~/.workplace/`. Create it if it
-does not exist (`mkdir -p ~/.workplace`) and keep every clone, download, output,
-and scratch file inside it. Do not write project files anywhere else in the
-server's home or filesystem.
-
-### Conda environments (servers)
-
-Use only project-owned envs. Never install into, modify, or run jobs from a
-pre-existing env unless the user explicitly designates it.
-
-- **`dell`**: project env exists at `~/miniconda3/envs/safesteer`. Run with
-  `~/miniconda3/bin/conda run -n safesteer ...`.
-- **`hello`**: project env exists at `~/.workplace/conda/envs/safesteer`. Run
-  with `~/.workplace/conda/envs/safesteer/bin/python ...`.
-
-### Hard rule: shared machines — never disturb other users' jobs
-
-These servers are SHARED. Before launching anything on a GPU you MUST:
-
-1. **Check occupancy first**: run `nvidia-smi` (or `nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu --format=csv`) and inspect running processes. On `dell`, check cards 6 and 7 specifically.
-2. **Only use a card that is free** (no other user's process, ample free memory). If your allowed card(s) are busy, WAIT or ask — do NOT preempt, kill, or crowd another job.
-3. **Pin your device explicitly** with `CUDA_VISIBLE_DEVICES` so a run can never spill onto a card you are not allowed to use (especially the 0–5 range on `dell`).
-4. **Never** kill, suspend, throttle, or reduce the memory headroom of any process you did not start. Causing even slight interference with another user's run is not acceptable.
-5. Size your own job (batch size, model size, parallelism) to fit comfortably within the free memory on your allowed card(s), leaving margin.
-
-When in doubt about whether a card is free or whether an action could affect someone else, stop and ask the user rather than risk interference.
-
-### Network proxy (temporary use only, leave no trace)
-
-Outbound proxy: `http://10.77.0.11:10808`. On the shared servers use it **only
-per-command, never persisted** — a lingering proxy address is a privacy leak
-others would inherit:
-
-- Inline per command, e.g.
-  `https_proxy=http://10.77.0.11:10808 http_proxy=http://10.77.0.11:10808 hf download ...`
-- Never `export` it session-wide, and never write it into `~/.bashrc`,
-  `git config`, pip/conda config, `/etc/environment`, or any dotfile.
-- Leave no trace in shell history or config after use.
-
-### Inter-machine file transfer (local <-> servers, server <-> server)
-
-For moving models / data / results between machines on the LAN (`10.77.0.x`):
-
-- **Prefer `rsync` over `scp`** — it resumes partial transfers
-  (`--partial --inplace`) and skips identical files.
-- **Do NOT route LAN transfers through the proxy** (it's for outbound internet
-  only). Clear proxy vars first (`unset *_proxy`); a proxy-polluted shell
-  silently tunnels the local copy through the proxy and crawls.
-- **Use an absolute remote path, not `~`** — `~` may expand locally and `mkdir`
-  fails. Example:
-  `rsync -a --partial --inplace <SRC>/ dell@10.77.0.102:/home/dell/.workplace/models/<Model>/`
-- Reuse what a host already has before re-copying (省流量): check its HF cache
-  and `~/.workplace`. A gated cache dir can be an *empty shell* (~KB metadata) —
-  verify real weight size, not just that the dir exists.
-- **rsync has slow-start**; judge speed after ~30s. Measured here: **dell rsync
-  ~40MB/s ≫ hello / proxy ~4-8MB/s** — dell is the fast hub, prefer it for bulk
-  pulls. (hf-mirror and the `10.81.2.14:3128` proxy were unreachable for HF.)
+The former shared science skill shims are retired. Use only project-owned
+environments, never install into `base`, and ask when a required environment
+path is not documented or conflicts with live state.
 
 <!-- SPECKIT START -->
 For additional context about technologies to be used, project structure,
